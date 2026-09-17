@@ -18,22 +18,54 @@ Compatible with any MCP-compatible client (Claude Code, Cursor, custom agents).
 opencode mcp add multilint --url http://localhost:8592
 ```
 
-### Other MCP clients
+### Claude Code
 
-Configure in `opencode.jsonc`:
+Claude Code uses `claude mcp add` to connect. Use `--transport http` with the `/mcp` endpoint:
+
+```sh
+claude mcp add --transport http multilint http://localhost:8592/mcp
+```
+
+Add `--scope user` for global scope, `--scope project` to write `.mcp.json` (shared with team).
+
+**JSON config** (`.mcp.json` in project root, or `~/.claude.json` globally):
 
 ```json
 {
   "mcpServers": {
     "multilint": {
-      "url": "http://localhost:8592",
-      "transport": "streamable-http"
+      "type": "http",
+      "url": "http://localhost:8592/mcp"
     }
   }
 }
 ```
 
-No shell access, no tool installation, no config management required.
+> **Note**: Claude Code's CLI `--transport` flag only accepts `stdio`, `sse`, `http` (not `streamable-http`). Use `type: "http"` in JSON — `streamable-http` works as an alias there.
+
+**Verify:**
+
+```sh
+claude mcp list
+claude mcp get multilint
+```
+
+Or inside a Claude Code session: `/mcp`
+
+### Other MCP clients
+
+Same connection string — any MCP-compatible client connects identically:
+
+```json
+{
+  "mcpServers": {
+    "multilint": {
+      "type": "http",
+      "url": "http://localhost:8592/mcp"
+    }
+  }
+}
+```
 
 ## Tools
 
