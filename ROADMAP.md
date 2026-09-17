@@ -24,9 +24,11 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
 
 **Implementation:** `--format {text,json}` flag added to `lint.sh:42-65`. JSON output renders to stdout with `summary`, `checks`, `return_code`, and `files` fields (lines 650-703). Terminal text output redirected to stderr. MCP tool supports optional `format` parameter.
 
-### 4. Docker Registry Publishing [P2] ⏳ Pending
+### 4. Docker Registry Publishing [P2] ❌ Deferred
 
 **Problem:** Users must build locally. No Docker Hub or ghcr.io presence.
+
+> **Status:** Deferred. Requires CI/CD pipeline, multi-arch build, and registry credentials. Not yet a priority given the Docker-in-Docker usage pattern (services already have Docker; they just build and run locally).
 
 **Changes:**
 
@@ -113,7 +115,7 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
 | P0 | Fix hardcoded paths | ✅ Complete | Low | Critical |
 | P0 | MCP Registry + GEO | ✅ Complete | Low | Critical |
 | P1 | Structured JSON output | ✅ Complete | Medium | High |
-| P2 | Docker publishing | ⏳ Pending | Medium | High |
+| P2 | Docker publishing | ❌ Deferred | Medium | High |
 | P2 | Expanded file types | ✅ Complete | Medium | Medium |
 | P2 | Security scanning | ✅ Complete | Medium-High | High |
 | P3 | Auto-fix | ⏳ Pending | Medium-High | Medium |
@@ -123,4 +125,4 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
 
 ## Active Work
 
-The remaining items (Docker publishing, auto-fix, telemetry) form the next development cycle. Priority order: Docker publishing (adoption) → auto-fix (actionability) → telemetry (observability).
+The remaining items (auto-fix, telemetry) form the next development cycle. Priority order: auto-fix (actionability) → telemetry (observability). Docker publishing is deferred pending a clear registry and CI/CD plan.

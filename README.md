@@ -15,7 +15,7 @@ Compatible with any MCP-compatible client (Claude Code, Cursor, custom agents).
 ### opencode (preferred)
 
 ```sh
-opencode mcp add multilint --url http://localhost:8592
+opencode mcp add multilint --url http://localhost:8592/mcp
 ```
 
 ### Claude Code
@@ -176,10 +176,12 @@ All enabled by default. Set to `"off"` to disable.
 MultiLint runs as a Docker container with `restart: unless-stopped`. The container is the deployment mechanism, not the product — the MCP server and HTTP API are what clients consume.
 
 ```bash
-cd ~/docker-compose.d/multilint
+cd <project-root>
 docker compose build
 docker compose up -d
 ```
+
+By default the compose file mounts the host's workspace as read-only at `/workspace` inside the container. This is what AI agents and CI pipelines lint.
 
 ## Developer Guide
 
@@ -223,6 +225,15 @@ The `lint_files` tool takes two string parameters with different roles:
 - `cwd` → Python imports resolve from there, `gitleaks --source` sees the `.git`, shell `source ../config.sh` resolves relative to the project root
 
 In the typical case both are the same — the repo root. `cwd` matters when the repo root differs from the subdirectory you want to lint.
+
+### Output Format
+
+`lint.sh` supports a `--format` flag (applies to direct invocation and the HTTP API):
+
+- `text` (default) — terminal output to stderr, JSON summary to stdout
+- `json` — structured output on stdout with `summary`, `checks`, `return_code`, and `files` fields
+
+The MCP tools always return structured results regardless of this flag.
 
 ### Optimization
 

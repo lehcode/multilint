@@ -26,7 +26,7 @@ All notable changes to MultiLint. This file follows [Keep a Changelog](https://k
 - **Claude Code integration** — HTTP proxy on port 8592 with streamable-http transport
 - `.gitleaks.toml` — gitleaks configuration file
 - `.multilint.json` — default threshold configuration
-- `opencode.json` — opencode permission rules and MCP memory config
+- `opencode.json` — agent prompt reference, MCP server URL, plugin path
 - `ROADMAP.md` — improvement roadmap with 8 phased items
 - `doc/promotion.md` — promotion plan with positioning, release strategy, adoption guide
 - Pre-commit hooks for multilint self-linting (black, pylint, flake8, shellcheck, pytest)
