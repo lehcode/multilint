@@ -1,0 +1,56 @@
+---
+fail_fast: true
+repos:
+  # Standard pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+        exclude: '\.md$'
+      - id: check-yaml
+        args: [--allow-multiple-documents, --unsafe]
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  # Shell script syntax validation (catches unclosed quotes, etc.)
+  - repo: local
+    hooks:
+      - id: bash-syntax
+        name: Bash syntax check
+        entry: bash -n
+        language: system
+        types: [shell]
+        exclude: '\.bats$'
+
+  # Shell script linting (Zero tolerance: fails on error, warning, info, style)
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.9.0
+    hooks:
+      - id: shellcheck
+        args: ['-e', 'SC1091,SC2155,SC2086', '-S', 'style']
+
+  # YAML linting
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.33.0
+    hooks:
+      - id: yamllint
+        args: ['-c', '.yamllint']
+
+  # Markdown linting
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.38.0
+    hooks:
+      - id: markdownlint
+        args: ['--config', '.markdownlint.json', '--fix']
+
+  # Secret detection (pre-push only - scans working directory)
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+        stages: [pre-push]
+        args: ['dir', '.', '--verbose', '--redact', '--config', '.gitleaks.toml']
