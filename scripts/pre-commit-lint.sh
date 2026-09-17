@@ -75,6 +75,8 @@ declare -A DIRS_TO_LINT
 FILES_MODIFIED=0
 
 while IFS= read -r filepath; do
+  # Skip empty lines
+  [ -z "$filepath" ] && continue
   [ -f "$filepath" ] || continue
   if is_lintable "$filepath"; then
     dir="$(dirname "$filepath")"
