@@ -18,6 +18,9 @@
 
 set -euo pipefail
 
+# ─── Debug ───────────────────────────────────────────────────────────────────
+echo "DEBUG: Hook executed" >&2
+
 # ─── Paths ───────────────────────────────────────────────────────────────────
 GL_CONFIG=".gitleaks.toml"
 GL_BIN="gitleaks"
@@ -82,7 +85,7 @@ while IFS= read -r filepath; do
     DIRS_TO_LINT["$dir"]=1
     FILES_MODIFIED=$((FILES_MODIFIED + 1))
   fi
-done < <(git diff --cached --name-only 2>/dev/null)
+done < <(git diff --cached --name-only)
 
 if [ "$FILES_MODIFIED" -eq 0 ]; then
   echo ""
