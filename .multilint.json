@@ -1,0 +1,10 @@
+{
+  "bash_syntax": 0,
+  "shellcheck": 0,
+  "bashate": 0,
+  "shfmt": 0,
+  "flake8": 0,
+  "black": 0,
+  "pylint": 0,
+  "markdownlint": 0
+}

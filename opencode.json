@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "references": {},
+  "agent": {
+    "multilint": {
+      "description": "Run code quality linting via the multilint service.",
+      "prompt": "agents/multilint.md"
+    }
+  },
+  "mcp": {
+    "servers": {
+      "multilint": {
+        "type": "remote",
+        "url": "http://localhost:8592/mcp"
+      }
+    }
+  },
+  "plugin": ["./.opencode/plugins/multilint-lint.js"]
+}

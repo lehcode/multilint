@@ -1,0 +1,7 @@
+__pycache__
+stderr.txt
+stdout.txt
+pids/
+.venv/
+.pytest_cache/
+*.bak*
