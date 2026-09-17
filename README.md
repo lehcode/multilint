@@ -176,6 +176,22 @@ All source files copied to `/usr/local/bin/`: `lint.sh`, `.gitleaks.toml`, `serv
 - `1` → runs HTTP + MCP servers as persistent background processes
 - `0`/unset → runs `lint.sh` and exits
 
+### Invocation: `path` vs `cwd`
+
+The `lint_files` tool takes two string parameters with different roles:
+
+| Parameter | Role | What it controls |
+|-----------|------|-----------------|
+| `path` | **What** to lint | Directory where `find` searches for files (passed to `lint.sh` as `$1`) |
+| `cwd` | **Context** for linting | Working directory for `subprocess.run()` — controls import resolution, relative includes, git history scanning |
+
+**Example:** `lint_files(path="./src/", cwd="/home/takeshi/my-project/")`
+
+- `path="./src/"` → `lint.sh` runs `find ./src/` → only lints files under `./src/`
+- `cwd` → Python imports resolve from there, `gitleaks --source` sees the `.git`, shell `source ../config.sh` resolves relative to the project root
+
+In the typical case both are the same — the repo root. `cwd` matters when the repo root differs from the subdirectory you want to lint.
+
 ### Optimization
 
 - `pip install --no-cache-dir` — no pip cache persisted
