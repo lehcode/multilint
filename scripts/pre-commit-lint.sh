@@ -18,9 +18,6 @@
 
 set -euo pipefail
 
-# ─── Debug ───────────────────────────────────────────────────────────────────
-echo "DEBUG: Hook executed" >&2
-
 # ─── Paths ───────────────────────────────────────────────────────────────────
 GL_CONFIG=".gitleaks.toml"
 GL_BIN="gitleaks"
@@ -96,7 +93,7 @@ if [ "$FILES_MODIFIED" -eq 0 ]; then
 fi
 
 echo ""
-info "Linting $FILES_MODIFIED file(s) across ${#DIRS_TO_LINT[@]} directory/directories..."
+info "Linting $FILES_MODIFIED file(s) across ${#DIRS_TO_LINT[@]} directories..."
 
 EXIT_CODE=0
 for dir in "${!DIRS_TO_LINT[@]}"; do
