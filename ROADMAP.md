@@ -29,6 +29,7 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
 **Problem:** Users must build locally. No Docker Hub or ghcr.io presence.
 
 **Changes:**
+
 - Create `.github/workflows/docker-publish.yml`:
   - Trigger: push to `main`, tags matching `v*`
   - `docker buildx` for multi-arch (linux/amd64, linux/arm64)
@@ -57,6 +58,7 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
 **Problem:** Detection-only. Manual fixes required.
 
 **Changes:**
+
 - Add `--fix` flag to `lint.sh`
 - When active, runs fix variants instead of check:
 
@@ -82,7 +84,9 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
 **Problem:** No visibility into lint coverage, pass rates, or file counts.
 
 **Changes:**
+
 - Add `telemetry` section to `.multilint.json`:
+
   ```json
   {
     "telemetry": {
@@ -91,6 +95,7 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
     }
   }
   ```
+
 - On each run (if enabled), POST anonymous data:
   - `check_duration_ms`, `files_count`, `checks_count`, `pass_rate`, `tool_versions`
 - No paths, no file contents, no user identifiers

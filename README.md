@@ -1,6 +1,6 @@
 # multilint
 
-A single-purpose container that lints shell, Python, Markdown, YAML, JSON, and TOML files in a target directory. Exposes functionality via HTTP API and MCP server for AI agent delegation.
+A single-purpose MCP that lints shell, Python, Markdown, YAML, JSON, and TOML files in a target directory. Exposes functionality via HTTP API and MCP server for AI agent delegation.
 
 ## Build
 
@@ -190,4 +190,3 @@ markdownlint (Node.js) is built in a separate `node:20` stage, then copied into 
 **`pylint` passes a file you expect to fail** — only error-class messages are enabled. Run it directly through `docker exec`, without `--disable`, to see the full report.
 
 **Security checks fail on legitimate files** — hardcoded secrets detection excludes `server.py`, `mcp_server.py`, `test_*.py`, and `__init__.py`. Add exclusions in your `.multilint.json` threshold or disable with `MULTILINT_SECURITY_CHECK=off`.
-# Test comment

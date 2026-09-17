@@ -5,15 +5,18 @@ All notable changes to MultiLint. This file follows [Keep a Changelog](https://k
 ## [Unreleased]
 
 ### Changed
+
 - **Deployment model** — switched from systemd-managed to Docker Compose `restart: unless-stopped`; systemd service (`docker-compose@multilint`) deprecated and removed
 - **Port configuration** — HTTP API on port 8591, MCP server on port 8592 (configurable via env vars)
 
 ### Fixed
+
 - Container now survives machine reboots and opencode restarts via Docker restart policy
 
 ## [0.1.0] — 2026-08-29
 
 ### Added
+
 - AI CLI client harness positioning (opencode-first, client-adaptable MCP)
 - **FastMCP migration** — replaced custom MCPServer with FastMCP (streamable-http on port 8592)
 - **New checks:** YAML/JSON formatting (prettier), TOML sorting (toml-sort), security scanning (grep-based secrets + dangerous patterns), gitleaks (git history secret detection)
@@ -32,6 +35,7 @@ All notable changes to MultiLint. This file follows [Keep a Changelog](https://k
 - `test_lint_sh_extended.py` — extended lint test suite
 
 ### Changed
+
 - Replaced hardcoded lint script paths with `MULTILINT_SCRIPT` env var (portable Docker container)
 - Shell script discovery now excludes `test/` and `fixtures/` directories
 - Python discovery now excludes `fixtures/` directory
@@ -41,14 +45,17 @@ All notable changes to MultiLint. This file follows [Keep a Changelog](https://k
 - `test_server.py` — removed mock_subprocess fixtures, tests use real subprocess execution
 
 ### Fixed
+
 - Dockerfile: use `node:20` (not slim) for npm, `nodejs` apt package for runtime, `gitleaks v8.30.1`
 - Pre-commit pytest hook runs from venv with proper path resolution
 - HTTP test client path resolution (`tests/unit/.../server.py` → `tests/.../server.py` → `tests/../server.py`)
 
 ### Removed
+
 - Zero-tolerance hard requirement — replaced with configurable thresholds (fail-fast only at 0)
 - `continue` statements in bash syntax check (now increments failure counter)
 
 ### Notes
+
 - `gitleaks` skips when `.git` not found (expected behavior)
 - All 11 checks now report per-check failure summaries with threshold comparison (✓ or ⚠)
