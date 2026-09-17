@@ -70,12 +70,11 @@ is_lintable() {
   esac
 }
 
-# Read stdin paths and collect directories to lint
+# Collect directories to lint from staged files
 declare -A DIRS_TO_LINT
 FILES_MODIFIED=0
 
 while IFS= read -r filepath; do
-  # Skip empty lines
   [ -z "$filepath" ] && continue
   [ -f "$filepath" ] || continue
   if is_lintable "$filepath"; then
@@ -83,7 +82,7 @@ while IFS= read -r filepath; do
     DIRS_TO_LINT["$dir"]=1
     FILES_MODIFIED=$((FILES_MODIFIED + 1))
   fi
-done
+done < <(git diff --cached --name-only 2>/dev/null)
 
 if [ "$FILES_MODIFIED" -eq 0 ]; then
   echo ""
