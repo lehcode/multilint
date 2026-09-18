@@ -5,3 +5,6 @@ pids/
 .venv/
 .pytest_cache/
 *.bak*
+dist
+node_modules/
+.npmrc
