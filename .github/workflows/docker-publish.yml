@@ -55,9 +55,9 @@ jobs:
         with:
           push: true
           tags: |
-            docker.io/lehcode/multilint:${GITHUB_REF_NAME}
+            docker.io/lehcode/multilint:${{ github.ref_name }}
             docker.io/lehcode/multilint:latest
-            ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME}
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
             ghcr.io/${{ github.repository }}:latest
           labels: |
             io.modelcontextprotocol.server.name=com.lehcode/multilint

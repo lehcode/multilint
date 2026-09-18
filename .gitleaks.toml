@@ -1,0 +1,28 @@
+title = "multilint Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlist for linted projects"
+paths = [
+  '''\.env\.example$''',
+  '''\.env\.sample$''',
+  '''\.gitleaks\.toml$''',
+  '''logs/.*''',
+]
+regexes = [
+  '''sk-1234567890abcdef''',
+  '''your-.*-key''',
+  '''YOUR_.*_KEY''',
+  '''placeholder''',
+  '''changeme''',
+]
+stopwords = [
+  "example",
+  "placeholder",
+  "sample",
+  "dummy",
+  "test",
+  "local",
+]
