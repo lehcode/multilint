@@ -2,7 +2,11 @@
 FROM node:20 AS node-tools
 RUN npm install -g markdownlint-cli prettier
 
-FROM python:3.12-slim
+FROM python:3.12-slim AS final
+
+LABEL io.modelcontextprotocol.server.name="io.github.username/multilint"
+LABEL io.modelcontextprotocol.server.version="0.1.0"
+LABEL org.opencontainers.image.description="Code quality delegation for AI agents — shellcheck, pylint, black, gitleaks via one MCP tool"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
