@@ -11,6 +11,7 @@ repos:
         exclude: '\.md$'
       - id: check-yaml
         args: [--allow-multiple-documents, --unsafe]
+        exclude: '^tests/test_files/.*$'
       - id: check-added-large-files
         args: ['--maxkb=1000']
       - id: check-merge-conflict
@@ -24,7 +25,7 @@ repos:
         entry: bash -n
         language: system
         types: [shell]
-        exclude: '\.bats$'
+        exclude: '(?:^\.bats$|^tests/test_files/.*$)'
 
   # Shell script linting (Zero tolerance: fails on error, warning, info, style)
   - repo: https://github.com/koalaman/shellcheck-precommit
@@ -40,6 +41,7 @@ repos:
     hooks:
       - id: yamllint
         args: ['-c', '.yamllint']
+        exclude: '^tests/test_files/.*$'
 
   # Markdown linting
   - repo: https://github.com/igorshubovych/markdownlint-cli

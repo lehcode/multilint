@@ -9,7 +9,7 @@ config:
 # Indentation issues
 bad_indent:
   value: test
-    nested: bad
+  nested: bad
 
 # Unquoted special characters
 special: @#$%^&*
