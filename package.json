@@ -1,6 +1,6 @@
 {
   "name": "@lehcode/multilint",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Provides agentic linting behavior by auto-registering the Multilint MCP server dual-mode plugin for OpenCode V1/V2.",
   "keywords": [
     "lint",

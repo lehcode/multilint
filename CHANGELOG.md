@@ -2,6 +2,14 @@
 
 All notable changes to MultiLint. This file follows [Keep a Changelog](https://keepachangelog.com/) and [SemVer](https://semver.org/).
 
+## [0.2.1](https://github.com/lehcode/multilint/compare/v0.2.0...v0.2.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* **ci:** upgrade npm before staging the release ([#8](https://github.com/lehcode/multilint/issues/8)) ([3f5b884](https://github.com/lehcode/multilint/commit/3f5b884e1123154c3be9f3ceb4c2b8aa86e88e79))
+* **docker:** move USER nobody below the build steps ([#9](https://github.com/lehcode/multilint/issues/9)) ([a295e1b](https://github.com/lehcode/multilint/commit/a295e1bc082f236f747d7f1aaac3a8f72fb505ad))
+
 ## [0.2.0](https://github.com/lehcode/multilint/compare/v0.1.6...v0.2.0) (2026-09-29)
 
 
