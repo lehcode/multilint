@@ -317,3 +317,166 @@ class TestGitleaks:
         assert config_path.exists()
         content = config_path.read_text()
         assert "useDefault" in content or "extend" in content
+
+
+# Every check lint.sh knows about. Kept here as a literal on purpose: the point
+# is to fail when lint.sh grows a check that never reaches the JSON, which is
+# exactly how mypy and bandit stayed invisible to consumers after being added.
+ALL_CHECKS = (
+    "bash_syntax",
+    "shellcheck",
+    "bashate",
+    "shfmt",
+    "flake8",
+    "black",
+    "pylint",
+    "mypy",
+    "bandit",
+    "markdownlint",
+    "yaml_prettier",
+    "json_prettier",
+    "toml_sort",
+    "security_secrets",
+    "security_dangerous_patterns",
+    "gitleaks",
+)
+
+
+def _lint_json(target, env=None):
+    """Run lint.sh --format json against target and return the parsed document."""
+    result = subprocess.run(
+        ["bash", str(LINT_SH), str(target), "--format", "json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **(env or {})},
+    )
+    assert result.stdout, f"no JSON on stdout; stderr tail: {result.stderr[-500:]}"
+    return json.loads(result.stdout)
+
+
+class TestJSONContract:
+    """The JSON contract the plugin consumes.
+
+    These assert invariants rather than individual tool verdicts, deliberately.
+    Two existing tests in this suite depend on bashate and gitleaks being
+    installed and change behaviour when they are not, which makes them report on
+    the environment rather than on lint.sh. Nothing below cares which linters the
+    host happens to have.
+    """
+
+    def test_every_check_reaches_json(self, sample_project):
+        """No check is missing from the emitted document."""
+        data = _lint_json(sample_project)
+        assert set(data["checks"]) == set(ALL_CHECKS)
+
+    def test_checks_run_is_derived(self, sample_project):
+        """summary.checks_run counts the checks actually emitted.
+
+        It was hardcoded to 11 while lint.sh tracked 16, so the summary
+        contradicted the object it summarised.
+        """
+        data = _lint_json(sample_project)
+        assert data["summary"]["checks_run"] == len(data["checks"])
+        assert data["summary"]["checks_run"] == len(ALL_CHECKS)
+
+    def test_status_vocabulary(self, sample_project):
+        """status only ever takes one of the three documented values."""
+        for name, check in _lint_json(sample_project)["checks"].items():
+            assert check["status"] in {"ok", "failed", "skipped"}, f"{name}: {check['status']}"
+
+    def test_passed_is_not_a_second_copy_of_failed(self, sample_project):
+        """passed counts clean units, not failures.
+
+        Regression guard: passed and failed were both int(parts[0]), so a check
+        reporting three failures also reported three passes.
+        """
+        checks = _lint_json(sample_project)["checks"]
+        for name, check in checks.items():
+            assert check["passed"] == max(check["total"] - check["failed"], 0), name
+        # sample_project contains deliberately broken files, so at least one
+        # check must disagree with the old behaviour for this test to mean
+        # anything. Without this the assertion above passes on an all-zero run.
+        assert any(c["failed"] > 0 and c["passed"] != c["failed"] for c in checks.values())
+
+    def test_skipped_checks_claim_no_work(self, sample_project):
+        """A skipped check reports no units and no failures."""
+        for name, check in _lint_json(sample_project)["checks"].items():
+            if check["status"] == "skipped":
+                assert check["total"] == 0, name
+                assert check["failed"] == 0, name
+
+    def test_failures_imply_failed_status(self, sample_project):
+        """Any check with failures reports status failed, threshold or not."""
+        for name, check in _lint_json(sample_project)["checks"].items():
+            if check["failed"] > 0:
+                assert check["status"] == "failed", name
+
+    def test_summary_lists_skipped_checks(self, sample_project):
+        """summary.checks_skipped agrees with the per-check statuses."""
+        data = _lint_json(sample_project)
+        expected = sorted(n for n, c in data["checks"].items() if c["status"] == "skipped")
+        assert data["summary"]["checks_skipped"] == expected
+
+    def test_disabled_check_is_skipped_not_passing(self, sample_project):
+        """Switching a check off reports skipped, never a silent pass.
+
+        Uses the documented toggle rather than PATH surgery, so the result does
+        not depend on which linters the host has.
+        """
+        data = _lint_json(sample_project, env={"MULTILINT_BLACK_CHECK": "off"})
+        assert data["checks"]["black"]["status"] == "skipped"
+        assert data["checks"]["black"]["total"] == 0
+
+    def test_check_order_is_stable(self, sample_project):
+        """Key order is fixed, not inherited from the environment."""
+        first = list(_lint_json(sample_project)["checks"])
+        second = list(_lint_json(sample_project, env={"ML_UNRELATED": "x"})["checks"])
+        assert first == second == list(ALL_CHECKS)
+
+
+class TestBrokenToolIsNotAPass:
+    """A tool that runs and crashes must not be reported as success.
+
+    markdownlint shipped broken for the life of the image — the binary was copied
+    without its node_modules and died with "Cannot find package 'commander'" —
+    while lint.sh printed ✓ for every Markdown file. The cause was `|| true` on
+    the command substitution, which made the exit status read `true`'s 0 instead
+    of markdownlint's.
+
+    The shim below reproduces that crash without needing markdownlint installed,
+    so this guards the fix on any host.
+    """
+
+    @staticmethod
+    def _shim(tmp_dir, name, exit_code, message):
+        bin_dir = Path(tmp_dir) / "shim-bin"
+        bin_dir.mkdir(exist_ok=True)
+        shim = bin_dir / name
+        shim.write_text(f'#!/bin/sh\necho "{message}" >&2\nexit {exit_code}\n')
+        shim.chmod(0o755)
+        return bin_dir
+
+    def test_crashing_markdownlint_fails_the_check(self, tmp_dir):
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        (proj / "doc.md").write_text("# Title\n\nBody.\n")
+        bin_dir = self._shim(tmp_dir, "markdownlint", 1, "Cannot find package 'commander'")
+
+        data = _lint_json(proj, env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"})
+
+        assert data["checks"]["markdownlint"]["status"] == "failed"
+        assert data["checks"]["markdownlint"]["failed"] == 1
+        assert data["return_code"] == 1
+
+    def test_working_markdownlint_passes_the_check(self, tmp_dir):
+        """The companion case, so the test above is not passing for free."""
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        (proj / "doc.md").write_text("# Title\n\nBody.\n")
+        bin_dir = self._shim(tmp_dir, "markdownlint", 0, "")
+
+        data = _lint_json(proj, env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"})
+
+        assert data["checks"]["markdownlint"]["status"] == "ok"
+        assert data["checks"]["markdownlint"]["total"] == 1
+        assert data["checks"]["markdownlint"]["failed"] == 0

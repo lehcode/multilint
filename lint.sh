@@ -18,6 +18,19 @@
 #   }
 #   Any key omitted defaults to 0.
 #
+# JSON output (--format json), per entry under "checks":
+#   failures            files that failed this check (gitleaks: findings)
+#   passed              total - failures
+#   total               units actually submitted to the tool; 0 when skipped
+#   threshold           configured tolerance
+#   threshold_exceeded  failures > threshold
+#   status              "ok" | "failed" | "skipped"
+#
+#   status is "skipped" when the tool is not installed or the check is switched
+#   off, so a consumer can tell "nothing was wrong" from "nothing was checked".
+#   summary.checks_skipped lists those names, and summary.checks_run is derived
+#   from the check list rather than hardcoded.
+#
 # Feature toggles:
 #   MULTILINT_BLACK_CHECK: set to "off" to skip black formatting check
 #   MULTILINT_SHFMT_CHECK: set to "off" to skip shfmt formatting check
@@ -183,10 +196,43 @@ check_failures[security_secrets]=0
 check_failures[security_dangerous_patterns]=0
 check_failures[gitleaks]=0
 
+# Canonical check list. Single source of truth for the JSON emitter and for
+# summary.checks_run, which used to be a hardcoded 11 that silently disagreed
+# with the counters above. It also fixes the order of the "checks" object, which
+# would otherwise follow environment-variable order and vary between runs.
+ALL_CHECKS=(
+    bash_syntax shellcheck bashate shfmt
+    flake8 black pylint mypy bandit
+    markdownlint
+    yaml_prettier json_prettier toml_sort
+    security_secrets security_dangerous_patterns
+    gitleaks
+)
+
+# Per-check units actually submitted to the tool, so "passed" has a denominator.
+# Without it, failures=0 is indistinguishable from "the check never ran" — the
+# false-green this pair of arrays exists to close.
+declare -A check_totals
+# Per-check outcome: "ok" until something says otherwise, "skipped" when the
+# tool is absent or the check is switched off. "failed" is derived in the
+# emitter from the failure counter, so it is never stored here.
+declare -A check_status
+for _ml_check in "${ALL_CHECKS[@]}"; do
+    check_totals[$_ml_check]=0
+    check_status[$_ml_check]="ok"
+done
+unset _ml_check
+
 info()  { echo -e "\n\033[1m→ $*\033[0m"; }
 pass()  { echo "  ✓ $*"; }
 fail()  { echo "  ✗ $*"; EXIT_CODE=1; }
 warn()  { echo "  ~ $*"; }
+
+# Record that $1 actually ran against one more unit of work.
+ran()  { check_totals[$1]=$(( check_totals[$1] + 1 )); }
+# Record that $1 did not run at all. Idempotent: the guards live inside the
+# per-file loops, so this fires once per file when a tool is missing.
+skipped() { check_status[$1]="skipped"; }
 
 # ---------------------------------------------------------------------------
 # Shell scripts
@@ -203,7 +249,8 @@ else
         echo ""
         echo "  📄 $f"
 
-        # Bash syntax check
+        # Bash syntax check — bash itself is always present, so no guard.
+        ran bash_syntax
         if bash -n "$f" >/dev/null 2>&1; then
             pass "bash syntax"
         else
@@ -213,22 +260,30 @@ else
         fi
 
         # ShellCheck — excludes SC1091/SC2155/SC2086, disables style
-        set +e
-        sc_output="$(shellcheck -e SC1091 -e SC2155 -e SC2086 -S style "$f" 2>&1)"
-        sc_code=$?
-        set -e
-        if [ "$sc_code" -eq 0 ]; then
-            pass "shellcheck"
+        if command -v shellcheck >/dev/null 2>&1; then
+            ran shellcheck
+            set +e
+            sc_output="$(shellcheck -e SC1091 -e SC2155 -e SC2086 -S style "$f" 2>&1)"
+            sc_code=$?
+            set -e
+            if [ "$sc_code" -eq 0 ]; then
+                pass "shellcheck"
+            else
+                echo "    $sc_output"
+                check_failures[shellcheck]=$(( check_failures[shellcheck] + 1 ))
+                fail "shellcheck"
+            fi
         else
-            echo "    $sc_output"
-            check_failures[shellcheck]=$(( check_failures[shellcheck] + 1 ))
-            fail "shellcheck"
+            skipped shellcheck
+            warn "shellcheck (not installed, skipping)"
         fi
 
         # Bashate — 4-space indentation check, excludes E006 (line length)
         if [ "$BASHATE_ENABLED" = "off" ]; then
+            skipped bashate
             warn "bashate (disabled)"
         elif command -v bashate >/dev/null 2>&1; then
+            ran bashate
             set +e
             bashate_output="$(bashate -i E006 "$f" 2>&1)"
             bashate_rc=$?
@@ -241,13 +296,16 @@ else
                 fail "bashate (indentation required)"
             fi
         else
+            skipped bashate
             warn "bashate (not installed, skipping)"
         fi
 
         # shfmt (format check only)
         if [ "$SHFMT_ENABLED" = "off" ]; then
+            skipped shfmt
             warn "shfmt (disabled)"
         elif command -v shfmt >/dev/null 2>&1; then
+            ran shfmt
             if shfmt -d "$f" | grep -q .; then
                 check_failures[shfmt]=$(( check_failures[shfmt] + 1 ))
                 fail "shfmt (formatting required)"
@@ -255,6 +313,7 @@ else
                 pass "shfmt"
             fi
         else
+            skipped shfmt
             warn "shfmt (not installed, skipping)"
         fi
     done
@@ -293,22 +352,30 @@ else
         echo "  🐍 $f"
 
         # flake8 (style)
-        set +e
-        pb_flake8="$(flake8 --max-line-length=120 --extend-ignore=E203,E111,E121,E124,BLK100 "$f" 2>&1)"
-        pb_flake8_rc=$?
-        set -e
-        if [ "$pb_flake8_rc" -eq 0 ]; then
-            pass "flake8"
+        if command -v flake8 >/dev/null 2>&1; then
+            ran flake8
+            set +e
+            pb_flake8="$(flake8 --max-line-length=120 --extend-ignore=E203,E111,E121,E124,BLK100 "$f" 2>&1)"
+            pb_flake8_rc=$?
+            set -e
+            if [ "$pb_flake8_rc" -eq 0 ]; then
+                pass "flake8"
+            else
+                echo "    $pb_flake8"
+                check_failures[flake8]=$(( check_failures[flake8] + 1 ))
+                fail "flake8"
+            fi
         else
-            echo "    $pb_flake8"
-            check_failures[flake8]=$(( check_failures[flake8] + 1 ))
-            fail "flake8"
+            skipped flake8
+            warn "flake8 (not installed, skipping)"
         fi
 
         # black (formatting)
         if [ "$BLACK_ENABLED" = "off" ]; then
+            skipped black
             warn "black (disabled)"
-        else
+        elif command -v black >/dev/null 2>&1; then
+            ran black
             set +e
             pb_black="$(black --check --line-length=120 "$f" 2>&1)"
             pb_black_rc=$?
@@ -320,19 +387,28 @@ else
                 check_failures[black]=$(( check_failures[black] + 1 ))
                 fail "black"
             fi
+        else
+            skipped black
+            warn "black (not installed, skipping)"
         fi
 
         # pylint (errors/warnings)
-        set +e
-        pb_pylint="$(pylint --disable=C,R,E0401,E1123,W1510 --output-format=text "$f" 2>&1)"
-        pb_pylint_rc=$?
-        set -e
-        if [ "$pb_pylint_rc" -eq 0 ]; then
-            pass "pylint"
+        if command -v pylint >/dev/null 2>&1; then
+            ran pylint
+            set +e
+            pb_pylint="$(pylint --disable=C,R,E0401,E1123,W1510 --output-format=text "$f" 2>&1)"
+            pb_pylint_rc=$?
+            set -e
+            if [ "$pb_pylint_rc" -eq 0 ]; then
+                pass "pylint"
+            else
+                echo "    $pb_pylint"
+                check_failures[pylint]=$(( check_failures[pylint] + 1 ))
+                fail "pylint"
+            fi
         else
-            echo "    $pb_pylint"
-            check_failures[pylint]=$(( check_failures[pylint] + 1 ))
-            fail "pylint"
+            skipped pylint
+            warn "pylint (not installed, skipping)"
         fi
 
         # mypy (static types)
@@ -342,8 +418,10 @@ else
         # every third-party import reports import-not-found and drowns out real
         # findings. This mirrors pylint running with E0401 disabled.
         if [ "$MYPY_ENABLED" = "off" ]; then
+            skipped mypy
             warn "mypy (disabled)"
-        else
+        elif command -v mypy >/dev/null 2>&1; then
+            ran mypy
             set +e
             pb_mypy="$(mypy --cache-dir="$MYPY_CACHE_DIR" --ignore-missing-imports \
                 --follow-imports=silent --no-error-summary "$f" 2>&1)"
@@ -356,12 +434,17 @@ else
                 check_failures[mypy]=$(( check_failures[mypy] + 1 ))
                 fail "mypy"
             fi
+        else
+            skipped mypy
+            warn "mypy (not installed, skipping)"
         fi
 
         # bandit (security)
         if [ "$BANDIT_ENABLED" = "off" ]; then
+            skipped bandit
             warn "bandit (disabled)"
-        else
+        elif command -v bandit >/dev/null 2>&1; then
+            ran bandit
             set +e
             pb_bandit="$(bandit -q "$BANDIT_SEVERITY" -f custom \
                 --msg-template "$BANDIT_TEMPLATE" "$f" 2>&1)"
@@ -374,6 +457,9 @@ else
                 check_failures[bandit]=$(( check_failures[bandit] + 1 ))
                 fail "bandit"
             fi
+        else
+            skipped bandit
+            warn "bandit (not installed, skipping)"
         fi
     done
 fi
@@ -412,12 +498,19 @@ else
 
         # markdownlint
         if command -v markdownlint >/dev/null 2>&1; then
+            ran markdownlint
             MD_CONFIG=""
             if [ -f ".markdownlint.json" ]; then
                 MD_CONFIG="-c .markdownlint.json"
             fi
+            # The former `|| true` on the next line was both redundant and
+            # actively harmful: `set +e` already stops a non-zero exit from
+            # aborting the script, while `|| true` made the command list itself
+            # succeed, so md_rc read `true`'s 0 and never markdownlint's status.
+            # Every Markdown file therefore reported ✓ — including while the
+            # binary was crashing outright with "Cannot find package 'commander'".
             set +e
-            md_output="$(markdownlint $MD_CONFIG "$f" 2>&1)" || true
+            md_output="$(markdownlint $MD_CONFIG "$f" 2>&1)"
             md_rc=$?
             set -e
             if [ "$md_rc" -eq 0 ]; then
@@ -428,6 +521,7 @@ else
                 fail "markdownlint"
             fi
         else
+            skipped markdownlint
             warn "markdownlint (not installed, skipping)"
         fi
     done
@@ -463,6 +557,8 @@ if [ ${#yaml_files[@]} -eq 0 ] && [ ${#json_files[@]} -eq 0 ]; then
     echo "  (none found)"
 else
     if [ "$YAML_JSON_ENABLED" = "off" ]; then
+        skipped yaml_prettier
+        skipped json_prettier
         warn "YAML/JSON checks (disabled)"
     elif command -v prettier >/dev/null 2>&1; then
         for f in "${yaml_files[@]}" "${json_files[@]}"; do
@@ -471,6 +567,7 @@ else
             echo "  📋 $f"
 
             if [[ "$f" == *.yaml || "$f" == *.yml ]]; then
+                ran yaml_prettier
                 set +e
                 prettier_output="$(prettier --check --log-level error "$f" 2>&1)"
                 prettier_rc=$?
@@ -483,6 +580,7 @@ else
                     fail "yaml prettier"
                 fi
             elif [[ "$f" == *.json ]]; then
+                ran json_prettier
                 set +e
                 prettier_output="$(prettier --check --log-level error "$f" 2>&1)"
                 prettier_rc=$?
@@ -497,6 +595,8 @@ else
             fi
         done
     else
+        skipped yaml_prettier
+        skipped json_prettier
         warn "prettier (not installed, skipping YAML/JSON checks)"
     fi
 fi
@@ -529,6 +629,7 @@ if [ ${#toml_files[@]} -eq 0 ]; then
     echo "  (none found)"
 else
     if [ "$TOML_ENABLED" = "off" ]; then
+        skipped toml_sort
         warn "TOML checks (disabled)"
     elif command -v toml-sort >/dev/null 2>&1; then
         for f in "${toml_files[@]}"; do
@@ -536,6 +637,7 @@ else
             echo ""
             echo "  📝 $f"
 
+            ran toml_sort
             set +e
             toml_output="$(toml-sort --check --sort-keys "$f" 2>&1)"
             toml_rc=$?
@@ -549,6 +651,7 @@ else
             fi
         done
     else
+        skipped toml_sort
         warn "toml-sort (not installed, skipping TOML checks)"
     fi
 fi
@@ -577,6 +680,8 @@ done
 info "Running security scans..."
 
 if [ "$SECURITY_ENABLED" = "off" ]; then
+    skipped security_secrets
+    skipped security_dangerous_patterns
     warn "Security checks (disabled)"
 else
     # --- Hardcoded secrets in shell scripts ---
@@ -585,6 +690,7 @@ else
     for f in "${shell_files[@]}"; do
         # Skip the lint script itself (contains patterns in comments)
         [ "$(basename "$f")" = "lint.sh" ] && continue
+        ran security_secrets
         set +e
         secret_output=$(grep -Eni \
             "(password|passwd|secret|api_key|apikey|token|auth_token)[[:space:]]*=[[:space:]]*[\"'][^\"']+[\"']" \
@@ -610,6 +716,7 @@ else
         case "$f" in
             */fixtures/*|*/test_project/*) continue ;;
         esac
+        ran security_secrets
         set +e
         py_secret_output=$(grep -Eni \
             "(password|passwd|secret|api_key|apikey|token|auth_token)[[:space:]]*=[[:space:]]*[\"'][^\"']+[\"']" \
@@ -629,6 +736,7 @@ else
     for f in "${shell_files[@]}"; do
         # Skip the lint script itself (contains patterns in comments)
         [ "$(basename "$f")" = "lint.sh" ] && continue
+        ran security_dangerous_patterns
         set +e
         dangerous_output=$(grep -Eni \
             'chmod[[:space:]]+777|curl[[:space:]].*[[:space:]]*\|[[:space:]]*.*bash|eval[[:space:]]+.*\$' \
@@ -666,11 +774,17 @@ done
 info "Running gitleaks..."
 
 if [ "$GITLEAKS_ENABLED" = "off" ]; then
+    skipped gitleaks
     warn "gitleaks (disabled)"
 elif command -v gitleaks >/dev/null 2>&1; then
     if [ ! -d "$TARGET_DIR/.git" ]; then
+        # Not a defect: gitleaks scans git history, so a non-repository target
+        # has nothing to scan. Still reported as skipped rather than as a pass,
+        # because "no history examined" is not "no secrets in history".
+        skipped gitleaks
         warn "gitleaks (.git not found, skipping)"
     else
+        ran gitleaks
         set +e
         if [ "$GITLEAKS_DEPTH" = "all" ]; then
             gitleaks_output="$(gitleaks detect --source "$TARGET_DIR" \
@@ -695,6 +809,7 @@ elif command -v gitleaks >/dev/null 2>&1; then
         fi
     fi
 else
+    skipped gitleaks
     warn "gitleaks (not installed, skipping)"
 fi
 
@@ -719,14 +834,31 @@ echo ""
 if [ "$OUTPUT_FORMAT" = "json" ]; then
     # Restore stdout for JSON output
     exec 1>&3
-    # Export data for JSON generation
-    for check in bash_syntax shellcheck bashate shfmt flake8 black pylint markdownlint security_secrets security_dangerous_patterns gitleaks; do
+    # Export data for JSON generation.
+    #
+    # Driven by ALL_CHECKS rather than a hand-maintained list. The old literal
+    # enumerated 11 names and omitted mypy, bandit, yaml_prettier, json_prettier
+    # and toml_sort, so five checks could fail and never appear in the JSON that
+    # the plugin consumes.
+    #
+    # Record layout is failures:threshold:exceeded:status:total. status and total
+    # are appended after the original three fields, so the positional indices
+    # anything already parsing this format relies on do not move.
+    for check in "${ALL_CHECKS[@]}"; do
         failures=${check_failures[$check]}
+        total=${check_totals[$check]}
+        status=${check_status[$check]}
         threshold_var="${check}_threshold"
         threshold=${!threshold_var}
         threshold_exceeded="false"
         [ "$failures" -gt "$threshold" ] && threshold_exceeded="true"
-        export "ML_CHECK_${check}=${failures}:${threshold}:${threshold_exceeded}"
+        # A check with failures reports "failed" regardless of threshold: the
+        # threshold governs whether the run fails, not whether the check found
+        # anything. "skipped" wins, since a check that never ran cannot fail.
+        if [ "$status" != "skipped" ] && [ "$failures" -gt 0 ]; then
+            status="failed"
+        fi
+        export "ML_CHECK_${check}=${failures}:${threshold}:${threshold_exceeded}:${status}:${total}"
     done
     # Build file list as comma-separated
     ML_FILES=""
@@ -737,30 +869,57 @@ if [ "$OUTPUT_FORMAT" = "json" ]; then
         FIRST=0
     done
     export ML_FILES
-    export ML_CHECKS_COUNT=11
+    # Emission order for the "checks" object. Reading os.environ instead would
+    # make key order depend on the environment, so it varied run to run.
+    ML_CHECK_ORDER="$(IFS=,; echo "${ALL_CHECKS[*]}")"
+    export ML_CHECK_ORDER
+    # Derived, not hardcoded. This was literally 11 while check_failures held 16
+    # entries, so summary.checks_run disagreed with the checks it summarised.
+    export ML_CHECKS_COUNT=${#ALL_CHECKS[@]}
     export ML_TOTAL_FILES=${#FILES_CHECKED[@]}
     export ML_EXIT_CODE=$EXIT_CODE
     # shellcheck disable=SC2155
     _ml_json="$(
         python3 <<'ML_PYTHON'
 import json, os
+
+# Record layout exported by the shell above:
+#   failures : threshold : threshold_exceeded : status : total
+FAILURES, THRESHOLD, EXCEEDED, STATUS, TOTAL = range(5)
+
 checks = {}
-_ml_keys = list(os.environ.keys())
-for _k in _ml_keys:
-    if _k.startswith("ML_CHECK_"):
-        name = _k[9:]
-        parts = os.environ[_k].split(":")
+for name in os.environ.get("ML_CHECK_ORDER", "").split(","):
+    name = name.strip()
+    raw = os.environ.get("ML_CHECK_" + name) if name else None
+    if raw:
+        parts = raw.split(":")
+        failed = int(parts[FAILURES])
+        total = int(parts[TOTAL])
         checks[name] = {
-            "passed": int(parts[0]),
-            "failed": int(parts[0]),
-            "threshold": int(parts[1]),
-            "threshold_exceeded": parts[2] == "true",
+            # "passed" previously held int(parts[0]) — the failure count, the
+            # same value as "failed". It now means what its name says: units
+            # that went through this check and came back clean. max() guards
+            # against gitleaks, whose counter holds findings rather than files
+            # and can therefore exceed its own total of 1.
+            "passed": max(total - failed, 0),
+            "failed": failed,
+            "total": total,
+            "threshold": int(parts[THRESHOLD]),
+            "threshold_exceeded": parts[EXCEEDED] == "true",
+            # "ok" | "failed" | "skipped". Without this a missing tool and a
+            # clean pass are both failures=0, so a check that never ran is
+            # indistinguishable from one that ran and found nothing.
+            "status": parts[STATUS],
         }
 files = [f.strip() for f in os.environ.get("ML_FILES", "").split(",") if f.strip()]
+skipped = sorted(n for n, c in checks.items() if c["status"] == "skipped")
 result = {
     "summary": {
         "files_checked": len(files),
         "checks_run": int(os.environ.get("ML_CHECKS_COUNT", 8)),
+        # Promoted into the summary so a consumer can react to skipped checks
+        # without walking every entry in "checks".
+        "checks_skipped": skipped,
     },
     "checks": checks,
     "return_code": int(os.environ.get("ML_EXIT_CODE", "0")),
