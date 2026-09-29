@@ -11,7 +11,8 @@
 # Config format (.multilint.json):
 #   {
 #     "bash_syntax": 0, "shellcheck": 0, "bashate": 0, "shfmt": 0,
-#     "flake8": 0, "black": 0, "pylint": 0, "markdownlint": 0,
+#     "flake8": 0, "black": 0, "pylint": 0, "mypy": 0, "bandit": 0,
+#     "markdownlint": 0,
 #     "yaml_prettier": 0, "json_prettier": 0, "toml_sort": 0,
 #     "security_secrets": 0, "security_dangerous_patterns": 0
 #   }
@@ -21,6 +22,10 @@
 #   MULTILINT_BLACK_CHECK: set to "off" to skip black formatting check
 #   MULTILINT_SHFMT_CHECK: set to "off" to skip shfmt formatting check
 #   MULTILINT_BASHATE_CHECK: set to "off" to skip bashate indentation check
+#   MULTILINT_MYPY_CHECK: set to "off" to skip mypy static type check
+#   MULTILINT_BANDIT_CHECK: set to "off" to skip bandit security check
+#   MULTILINT_MYPY_CACHE_DIR: mypy cache location (default: /tmp/.mypy_cache)
+#   MULTILINT_BANDIT_SEVERITY: bandit severity flag (default: -ll, medium and high)
 #   MULTILINT_SECURITY_CHECK: set to "off" to skip security scanning
 #   MULTILINT_GITLEAKS_CHECK: set to "off" to skip gitleaks scanning
 #   MULTILINT_TOML_CHECK: set to "off" to skip TOML linting
@@ -100,6 +105,10 @@ black_threshold=$(get_threshold black)
 # shellcheck disable=SC2034
 pylint_threshold=$(get_threshold pylint)
 # shellcheck disable=SC2034
+mypy_threshold=$(get_threshold mypy)
+# shellcheck disable=SC2034
+bandit_threshold=$(get_threshold bandit)
+# shellcheck disable=SC2034
 markdownlint_threshold=$(get_threshold markdownlint)
 
 # New check thresholds
@@ -122,9 +131,26 @@ gitleaks_threshold=$(get_threshold gitleaks)
 # MULTILINT_BLACK_CHECK: set to "off" to skip black formatting check
 # MULTILINT_SHFMT_CHECK: set to "off" to skip shfmt formatting check
 # MULTILINT_BASHATE_CHECK: set to "off" to skip bashate indentation check
+# MULTILINT_MYPY_CHECK: set to "off" to skip mypy static type check
+# MULTILINT_BANDIT_CHECK: set to "off" to skip bandit security check
 BLACK_ENABLED="${MULTILINT_BLACK_CHECK:-on}"
 SHFMT_ENABLED="${MULTILINT_SHFMT_CHECK:-on}"
 BASHATE_ENABLED="${MULTILINT_BASHATE_CHECK:-on}"
+MYPY_ENABLED="${MULTILINT_MYPY_CHECK:-on}"
+BANDIT_ENABLED="${MULTILINT_BANDIT_CHECK:-on}"
+
+# mypy writes an incremental cache beside the sources it checks. The workspace is
+# mounted read-only, where that makes mypy abort with "INTERNAL ERROR", so the
+# cache is redirected to a writable path. Overridable for non-container use.
+MYPY_CACHE_DIR="${MULTILINT_MYPY_CACHE_DIR:-/tmp/.mypy_cache}"
+
+# bandit reports low-severity findings (assert usage, subprocess imports) that are
+# noise in this codebase; -ll limits output to medium and high severity.
+BANDIT_SEVERITY="${MULTILINT_BANDIT_SEVERITY:--ll}"
+
+# bandit's default report appends a metrics block that says nothing actionable. The
+# custom format collapses each finding to a single grep-friendly line.
+BANDIT_TEMPLATE="{relpath}:{line}: [{test_id}] {severity}: {msg}"
 # shellcheck disable=SC2034
 SECURITY_ENABLED="${MULTILINT_SECURITY_CHECK:-on}"
 # shellcheck disable=SC2034
@@ -147,6 +173,8 @@ check_failures[shfmt]=0
 check_failures[flake8]=0
 check_failures[black]=0
 check_failures[pylint]=0
+check_failures[mypy]=0
+check_failures[bandit]=0
 check_failures[markdownlint]=0
 check_failures[yaml_prettier]=0
 check_failures[json_prettier]=0
@@ -306,12 +334,53 @@ else
             check_failures[pylint]=$(( check_failures[pylint] + 1 ))
             fail "pylint"
         fi
+
+        # mypy (static types)
+        #
+        # --ignore-missing-imports and --follow-imports=silent are required, not
+        # cosmetic: the image installs no project dependencies, so without them
+        # every third-party import reports import-not-found and drowns out real
+        # findings. This mirrors pylint running with E0401 disabled.
+        if [ "$MYPY_ENABLED" = "off" ]; then
+            warn "mypy (disabled)"
+        else
+            set +e
+            pb_mypy="$(mypy --cache-dir="$MYPY_CACHE_DIR" --ignore-missing-imports \
+                --follow-imports=silent --no-error-summary "$f" 2>&1)"
+            pb_mypy_rc=$?
+            set -e
+            if [ "$pb_mypy_rc" -eq 0 ]; then
+                pass "mypy"
+            else
+                echo "    $pb_mypy"
+                check_failures[mypy]=$(( check_failures[mypy] + 1 ))
+                fail "mypy"
+            fi
+        fi
+
+        # bandit (security)
+        if [ "$BANDIT_ENABLED" = "off" ]; then
+            warn "bandit (disabled)"
+        else
+            set +e
+            pb_bandit="$(bandit -q "$BANDIT_SEVERITY" -f custom \
+                --msg-template "$BANDIT_TEMPLATE" "$f" 2>&1)"
+            pb_bandit_rc=$?
+            set -e
+            if [ "$pb_bandit_rc" -eq 0 ]; then
+                pass "bandit"
+            else
+                echo "    $pb_bandit"
+                check_failures[bandit]=$(( check_failures[bandit] + 1 ))
+                fail "bandit"
+            fi
+        fi
     done
 fi
 
 echo ""
 # Threshold summary for Python checks
-for check in flake8 black pylint; do
+for check in flake8 black pylint mypy bandit; do
     failures=${check_failures[$check]}
     threshold_var="${check}_threshold"
     threshold=${!threshold_var}
