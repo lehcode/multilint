@@ -4,6 +4,10 @@ All notable changes to MultiLint. This file follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- **OpenCode V2 plugin** — auto-lint on file save via `execute.after` hook; supports `.sh`, `.bash`, `.py`, `.md`, `.yaml`, `.yml`, `.json`, `.toml`; errors appended to tool result for agent visibility
+
 ### Changed
 
 - **Deployment model** — switched from systemd-managed to Docker Compose `restart: unless-stopped`; systemd service (`docker-compose@multilint`) deprecated and removed

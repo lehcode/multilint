@@ -242,6 +242,30 @@ The MCP tools always return structured results regardless of this flag.
 - `mypy` installed for dev testing only (not used in linting)
 - `bandit` installed but lint.sh uses grep-based security scanning
 
+## OpenCode Plugin
+
+MultiLint ships with an OpenCode V2 plugin (`./.opencode/plugins/multilint-lint.js`) that runs linting automatically after file saves.
+
+### How It Works
+
+1. Listens for `execute.after` events on tool executions
+2. Extracts the file path from the tool input
+3. Checks whether the file extension is lintable: `.sh`, `.bash`, `.py`, `.md`, `.yaml`, `.yml`, `.json`, `.toml`
+4. Calls the multilint HTTP API (`POST /lint`) with the file's parent directory
+5. Any errors are appended to the tool result so the agent sees them in context
+6. Silent if the server is unreachable or no errors are found
+
+### Configuration
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `MULTILINT_HOST` | `http://localhost:8591` | Multilint HTTP API base URL |
+
+### Limitations
+
+- Only hooks into tool executions; not triggered by file watchers or manual edits
+- Non-blocking — failures do not prevent the save from completing
+
 ## Troubleshooting
 
 **AI agent can't connect** — verify the container is running (`docker ps --filter name=multilint`) and port 8592 is reachable.
