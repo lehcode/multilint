@@ -1,0 +1,41 @@
+# Development and CI dependencies, pinned.
+#
+# Pinned because unpinned linters make CI non-deterministic: a green pull request
+# silently turns red when a new release lands. That happened — black 26.5.1
+# enforces a single blank line after a module docstring where 25.11.0 did not, so
+# `pip install black` in CI rejected a file the maintainer's black accepted.
+#
+# Use a virtualenv, not a base conda environment. Every version here is chosen
+# for this project, and installing them globally fights whatever else shares that
+# environment. On this workstation the base conda env holds docspec-python, which
+# constrains black to <24.0.0 and cannot coexist with the version below.
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements-dev.txt
+#   .venv/bin/python -m pytest tests/unit -q
+#
+# Keep these in step with .github/workflows/develop-checks.yml, which pins the
+# same versions so a local run and a CI run mean the same thing.
+
+# --- Test runner ---------------------------------------------------------------
+# pytest-asyncio is required because pytest.ini sets asyncio_mode = auto.
+# pytest-mock is imported directly by tests/conftest.py.
+# fastmcp is imported by mcp_server.py, which tests/unit/test_mcp_server.py
+# exercises; it pulls in mcp transitively.
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-mock==3.16.0
+fastmcp==4.0.10
+
+# --- Linters run in CI --------------------------------------------------------
+# Flags live in lint.sh; these are the tools behind them.
+black==26.5.1
+flake8==7.4.1
+
+# --- Tools two unit tests shell out to ----------------------------------------
+# tests/unit/test_lint_sh.py::TestThresholds::test_threshold_config_file_read
+# asserts on bashate output and quietly changes meaning when bashate is absent.
+# The companion case, test_gitleaks_no_git, needs the gitleaks binary, which is
+# not a Python package — the workflow installs it from GitHub Releases, pinned to
+# the same version as the Dockerfile.
+bashate==2.1.1

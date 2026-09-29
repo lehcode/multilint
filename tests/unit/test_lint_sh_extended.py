@@ -384,19 +384,42 @@ class TestJSONContract:
         for name, check in _lint_json(sample_project)["checks"].items():
             assert check["status"] in {"ok", "failed", "skipped"}, f"{name}: {check['status']}"
 
-    def test_passed_is_not_a_second_copy_of_failed(self, sample_project):
-        """passed counts clean units, not failures.
-
-        Regression guard: passed and failed were both int(parts[0]), so a check
-        reporting three failures also reported three passes.
-        """
+    def test_passed_is_consistent_with_total_and_failed(self, sample_project):
+        """passed is the clean remainder, for every check."""
         checks = _lint_json(sample_project)["checks"]
         for name, check in checks.items():
             assert check["passed"] == max(check["total"] - check["failed"], 0), name
-        # sample_project contains deliberately broken files, so at least one
-        # check must disagree with the old behaviour for this test to mean
-        # anything. Without this the assertion above passes on an all-zero run.
-        assert any(c["failed"] > 0 and c["passed"] != c["failed"] for c in checks.values())
+        # The loop above is vacuous if nothing ran at all, which is the state on
+        # a runner with no linters installed.
+        assert any(c["total"] > 0 for c in checks.values())
+
+    def test_passed_is_not_a_second_copy_of_failed(self, tmp_dir):
+        """passed counts clean units, not failures.
+
+        Regression guard for passed and failed both being int(parts[0]).
+
+        Built rather than taken from a fixture, because the arithmetic has to be
+        unambiguous. With two files and one failure the old and new behaviour
+        both yield passed == 1, so such a case proves nothing — an earlier
+        version of this test asserted against `sample_project` and passed on
+        CI's toolchain-free runner for exactly that reason.
+
+        Three files, one broken: total 3, failed 1, so passed must be 2. The old
+        emitter reported 1. bash -n needs no external tool, so this holds on any
+        host.
+        """
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        (proj / "ok1.sh").write_text("#!/usr/bin/env bash\necho one\n")
+        (proj / "ok2.sh").write_text("#!/usr/bin/env bash\necho two\n")
+        (proj / "broken.sh").write_text('#!/usr/bin/env bash\nif [ "$FOO";\n  echo hi\nfi\n')
+
+        check = _lint_json(proj)["checks"]["bash_syntax"]
+
+        assert check["total"] == 3
+        assert check["failed"] == 1
+        assert check["passed"] == 2
+        assert check["status"] == "failed"
 
     def test_skipped_checks_claim_no_work(self, sample_project):
         """A skipped check reports no units and no failures."""
