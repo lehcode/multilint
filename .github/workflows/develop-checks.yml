@@ -1,0 +1,132 @@
+---
+name: Develop Checks
+
+# Integration-branch gate. Deliberately minimal: unit tests, three fast linters
+# and the npm build. The full 12-tool lint suite and the multi-arch image build
+# stay on the tag path, because both need the container image and neither should
+# sit between a contributor and a review.
+#
+# Releases are unaffected — release-please still triggers on pushes to master.
+
+on:
+  pull_request:
+    branches: ["develop"]
+  push:
+    branches: ["develop"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Verified against a clean venv, not the maintainer's environment, where
+      # conda already provides these and hides what is missing:
+      #   pytest-mock    tests/conftest.py:14 imports pytest_mock
+      #   fastmcp        tests/unit/test_mcp_server.py -> mcp_server.py:7; also
+      #                  pulls in mcp transitively (~12s)
+      #   pytest-asyncio pytest.ini sets asyncio_mode = auto
+      # Dropping any of these turns 59 passing tests into a collection error.
+      - name: Install test dependencies
+        run: pip install --quiet pytest pytest-asyncio pytest-mock fastmcp
+
+      # Two tests in tests/unit/ shell out to lint.sh and assert on output that
+      # only appears when the tool in question is installed, so they have an
+      # undeclared dependency on the toolchain:
+      #   test_lint_sh.py::TestThresholds::test_threshold_config_file_read
+      #     expects "bashate: 1 failures"; without bashate lint.sh warns
+      #     "not installed, skipping" and the counter stays 0.
+      #   test_lint_sh_extended.py::TestGitleaks::test_gitleaks_no_git
+      #     expects "gitleaks (.git not found, skipping)"; without gitleaks it
+      #     takes the "not installed" branch instead.
+      # Installing the two tools keeps the assertions meaningful without editing
+      # the tests. gitleaks is pinned to the same version as Dockerfile:44 so CI
+      # and the container agree. The other nine tools stay out: no test needs
+      # them, and the full suite belongs on the tag path.
+      - name: Install the tools those tests exercise
+        run: |
+          pip install --quiet bashate
+          curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            | sudo tar xz -C /usr/local/bin gitleaks
+
+      # Selected by path, not by `-m unit`: pytest.ini declares the marker but no
+      # test applies it, so `-m unit` would collect nothing. tests/integration/
+      # needs a live HTTP server and stays off the PR path.
+      - name: Run unit tests
+        run: python -m pytest tests/unit -q
+
+  lint:
+    name: lint sources
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install linters
+        run: |
+          pip install --quiet flake8 black
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+
+      # Flags mirror lint.sh exactly (lint.sh:269, :285, :189) so a green CI run
+      # and a green local lint mean the same thing.
+      #
+      # File lists come from git rather than being hardcoded, so paths that do
+      # not exist yet on this branch (claude-plugin/ arrives with PR #12) are
+      # picked up automatically once merged. -z/-0 survives odd filenames and -r
+      # makes an empty list a no-op instead of linting the whole tree.
+      #
+      # tests/fixtures/ and tests/test_files/ are excluded because they hold
+      # deliberately broken code used as test input.
+      - name: flake8
+        run: |
+          git ls-files -z '*.py' ':!:tests/fixtures/**' ':!:tests/test_files/**' \
+            | xargs -0 -r flake8 --max-line-length=120 \
+                --extend-ignore=E203,E111,E121,E124,BLK100
+
+      - name: black
+        run: |
+          git ls-files -z '*.py' ':!:tests/fixtures/**' ':!:tests/test_files/**' \
+            | xargs -0 -r black --check --line-length=120
+
+      - name: shellcheck
+        run: |
+          git ls-files -z '*.sh' ':!:tests/**' \
+            | xargs -0 -r shellcheck -e SC1091 -e SC2155 -e SC2086 -S style
+
+  build:
+    name: npm build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The npm package is published from this repo, so esbuild or tsc breakage
+      # must not reach master where it would fail the release instead.
+      - name: Build
+        run: npm run build
