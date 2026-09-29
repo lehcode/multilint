@@ -13,28 +13,16 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 DEFAULT_ALLOWED_ROOTS = "/workspace:/multilint"
 
 
-def _resolve_run_dir(cwd: str | None) -> tuple[str | None, str | None]:
-    """Validate a requested run directory against an allowlist of roots.
+def _allowed_roots() -> list[str]:
+    """Return the realpath-resolved allowlist of permitted run directories.
 
-    Resolves the candidate with realpath() BEFORE comparison to defeat
-    "../.." traversal and symlink escapes, then requires it to equal an
-    allowed root or fall strictly inside one (root + os.sep boundary, so
-    "/workspace-evil" cannot pass as a child of "/workspace").
-
-    Returns (resolved_path, None) on success, or (None, error_message) on
-    rejection. Secure by default: no match, no access.
+    Roots come from MULTILINT_ALLOWED_ROOTS (colon-separated); the default is
+    the two read-only container mounts. Resolving the roots here is safe to
+    keep out of line: this function never touches the request-supplied path,
+    so it carries no taint of its own.
     """
     allowed_env = os.environ.get("MULTILINT_ALLOWED_ROOTS", DEFAULT_ALLOWED_ROOTS)
-    allowed_roots = [os.path.realpath(root) for root in allowed_env.split(":") if root]
-
-    candidate = cwd if cwd else "."
-    resolved = os.path.realpath(candidate)
-
-    for root in allowed_roots:
-        if resolved == root or resolved.startswith(root + os.sep):
-            return resolved, None
-
-    return None, "working directory not permitted"
+    return [os.path.realpath(root) for root in allowed_env.split(":") if root]
 
 
 class LintHandler(BaseHTTPRequestHandler):
@@ -71,16 +59,30 @@ class LintHandler(BaseHTTPRequestHandler):
 
             # Determine working directory: explicit cwd takes precedence,
             # otherwise default to "." (server's own directory).
-            # run_dir = cwd if cwd else "."  # replaced: validated via _resolve_run_dir below
-            run_dir, resolve_error = _resolve_run_dir(cwd)
+            # run_dir = cwd if cwd else "."  # replaced: validated inline below
+            #
+            # The realpath() normalisation and the containment guard are kept in
+            # this function, next to the isdir()/subprocess sinks they protect.
+            # An extracted helper is equivalent at runtime, but CodeQL's
+            # py/path-injection barrier detection does not follow a guard across
+            # a function-return boundary and keeps reporting the sink.
+            run_dir = os.path.realpath(cwd if cwd else ".")
 
-            if resolve_error:
+            permitted = False
+            for allowed_root in _allowed_roots():
+                # Exact match, or strictly inside the root. The os.sep boundary
+                # stops "/workspace-evil" passing as a child of "/workspace".
+                if run_dir == allowed_root or run_dir.startswith(allowed_root + os.sep):
+                    permitted = True
+                    break
+
+            if not permitted:
                 # Do not echo the resolved absolute path or allowlist contents
                 # to an unauthenticated caller — generic message only.
                 self._respond(
                     400,
                     {
-                        "error": resolve_error,
+                        "error": "working directory not permitted",
                         "return_code": 1,
                         "stdout": "",
                         "stderr": "",
