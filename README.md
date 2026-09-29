@@ -183,26 +183,6 @@ docker compose up -d
 
 By default the compose file mounts the host's workspace as read-only at `/workspace` inside the container. This is what AI agents and CI pipelines lint.
 
-## Release Process
-
-Releases are automated with [release-please](https://github.com/googleapis/release-please). Conventional Commits merged to `master` open or update a **Release PR** tracking the next version and changelog. Merging that PR:
-
-- Tags the release (`vX.Y.Z`)
-- Creates a GitHub release
-- Bumps `version` in `package.json`
-- Updates `CHANGELOG.md`
-
-The new tag then triggers `.github/workflows/docker-publish.yml`, which builds and pushes Docker images to Docker Hub and ghcr.io. Publishing the release triggers `.github/workflows/npm-publish.yml`, which **stages** `@lehcode/multilint` on npm with [provenance](https://docs.npmjs.com/generating-provenance-statements) attestation. Staging is not publishing: the `NPM_PUBLISH_TOKEN` secret is a stage-only token and cannot publish a version by itself. A maintainer promotes the staged version, supplying 2FA:
-
-```bash
-npm stage list
-npm stage approve <stage-id>
-```
-
-Until promoted, the version is not installable. `npm stage reject <stage-id>` discards it and `npm stage download <stage-id>` fetches the tarball for inspection first.
-
-The project is pre-1.0, so `bump-minor-pre-major` is enabled in `release-please-config.json`: a `feat:` commit bumps the minor version (e.g. `0.1.6` → `0.2.0`) instead of the patch.
-
 ## Developer Guide
 
 ### Dockerfile Stages
