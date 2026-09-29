@@ -31,15 +31,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Verified against a clean venv, not the maintainer's environment, where
-      # conda already provides these and hides what is missing:
-      #   pytest-mock    tests/conftest.py:14 imports pytest_mock
-      #   fastmcp        tests/unit/test_mcp_server.py -> mcp_server.py:7; also
-      #                  pulls in mcp transitively (~12s)
-      #   pytest-asyncio pytest.ini sets asyncio_mode = auto
-      # Dropping any of these turns 59 passing tests into a collection error.
+      # Pinned in requirements-dev.txt, installed from it so a local run and a CI
+      # run use identical versions. Unpinned installs made this job resolve to
+      # whatever had shipped that day, which turns a green pull request red
+      # without a commit: black 26.5.1 rejects a blank-line layout that 25.11.0
+      # accepts, so the maintainer's black and this job disagreed.
+      #
+      # Why each entry is needed is documented in that file.
       - name: Install test dependencies
-        run: pip install --quiet pytest pytest-asyncio pytest-mock fastmcp
+        run: pip install --quiet -r requirements-dev.txt
 
       # Two tests in tests/unit/ shell out to lint.sh and assert on output that
       # only appears when the tool in question is installed, so they have an
@@ -51,12 +51,12 @@ jobs:
       #     expects "gitleaks (.git not found, skipping)"; without gitleaks it
       #     takes the "not installed" branch instead.
       # Installing the two tools keeps the assertions meaningful without editing
-      # the tests. gitleaks is pinned to the same version as Dockerfile:44 so CI
-      # and the container agree. The other nine tools stay out: no test needs
-      # them, and the full suite belongs on the tag path.
-      - name: Install the tools those tests exercise
+      # the tests. bashate comes from requirements-dev.txt above; gitleaks is not
+      # a Python package, and is pinned here to the same version as the
+      # Dockerfile so CI and the container agree. The other nine tools stay out:
+      # no test needs them, and the full suite belongs on the tag path.
+      - name: Install gitleaks
         run: |
-          pip install --quiet bashate
           curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
             | sudo tar xz -C /usr/local/bin gitleaks
 
@@ -78,9 +78,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      # flake8 and black come pinned from requirements-dev.txt for the same
+      # reason as the test job: an unpinned linter changes the verdict on
+      # unchanged code. shellcheck comes from apt and is whatever the runner
+      # image carries, which is a known looseness — it has no pinned release
+      # asset the way gitleaks does.
       - name: Install linters
         run: |
-          pip install --quiet flake8 black
+          pip install --quiet -r requirements-dev.txt
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
 
