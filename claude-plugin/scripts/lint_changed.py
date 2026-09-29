@@ -20,7 +20,6 @@ Always exits 0. A missing server, an unmapped path or an empty changeset is a si
 the non-blocking behaviour of the OpenCode plugin.
 """
 
-
 # Required, not stylistic. This module runs on the *host* interpreter, which the
 # plugin does not control, and it annotates with PEP 604 unions (`Path | None`).
 # Those are evaluated at function-definition time on Python 3.9, so importing
