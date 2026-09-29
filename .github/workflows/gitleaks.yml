@@ -1,10 +1,12 @@
 name: Gitleaks — Secret Scanner
 
+# 'develop' is the integration branch, so it is where code actually lands;
+# scanning only master would leave every feature PR unscanned until promotion.
 on:
   push:
-    branches: ['master', 'main']
+    branches: ['master', 'main', 'develop']
   pull_request:
-    branches: ['master', 'main']
+    branches: ['master', 'main', 'develop']
   workflow_dispatch:
 
 permissions:
