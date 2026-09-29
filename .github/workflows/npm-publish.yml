@@ -40,9 +40,19 @@ jobs:
           fi
           echo "version $pkg matches tag"
 
-      # prepublishOnly builds dist/, which is gitignored and so absent from a
-      # clean checkout. Without the build the tarball would ship empty.
-      - name: Publish
-        run: npm publish --provenance --access public
+      # Stages the version rather than publishing it: NPM_PUBLISH_TOKEN is a
+      # stage-only token, which cannot publish directly. A maintainer promotes
+      # it afterwards with `npm stage approve <stage-id>`, supplying 2FA — so
+      # the credential living in CI can never publish on its own.
+      #
+      # prepublishOnly runs here and builds dist/, which is gitignored and so
+      # absent from a clean checkout; without it the tarball would ship empty.
+      - name: Stage release
+        run: npm stage publish --provenance --access public
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+
+      - name: Report staged version
+        run: |
+          echo "Staged $(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")."
+          echo "Promote it with: npm stage list && npm stage approve <stage-id>"

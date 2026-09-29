@@ -192,7 +192,14 @@ Releases are automated with [release-please](https://github.com/googleapis/relea
 - Bumps `version` in `package.json`
 - Updates `CHANGELOG.md`
 
-The new tag then triggers `.github/workflows/docker-publish.yml`, which builds and pushes Docker images to Docker Hub and ghcr.io. Publishing the release triggers `.github/workflows/npm-publish.yml`, which publishes `@lehcode/multilint` to npm with [provenance](https://docs.npmjs.com/generating-provenance-statements) attestation. That job requires an `NPM_TOKEN` secret holding an npm automation token.
+The new tag then triggers `.github/workflows/docker-publish.yml`, which builds and pushes Docker images to Docker Hub and ghcr.io. Publishing the release triggers `.github/workflows/npm-publish.yml`, which **stages** `@lehcode/multilint` on npm with [provenance](https://docs.npmjs.com/generating-provenance-statements) attestation. Staging is not publishing: the `NPM_PUBLISH_TOKEN` secret is a stage-only token and cannot publish a version by itself. A maintainer promotes the staged version, supplying 2FA:
+
+```bash
+npm stage list
+npm stage approve <stage-id>
+```
+
+Until promoted, the version is not installable. `npm stage reject <stage-id>` discards it and `npm stage download <stage-id>` fetches the tarball for inspection first.
 
 The project is pre-1.0, so `bump-minor-pre-major` is enabled in `release-please-config.json`: a `feat:` commit bumps the minor version (e.g. `0.1.6` → `0.2.0`) instead of the patch.
 
