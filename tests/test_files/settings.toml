@@ -1,0 +1,13 @@
+# Test TOML with intentional issues
+[basic]
+zzz_last = "should be first"
+aaa_first = "should be last"
+
+[table]
+name = "test"
+value = 123
+
+# Unsorted keys - toml-sort would reorganize
+[table.options]
+option_z = "z"
+option_a = "a"

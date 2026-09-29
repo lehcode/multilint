@@ -1,0 +1,15 @@
+# Test YAML with intentional issues
+name: test
+config:
+  key: "value"
+  list:
+    - item1
+    - item2
+
+# Indentation issues
+bad_indent:
+  value: test
+    nested: bad
+
+# Unquoted special characters
+special: @#$%^&*

@@ -1,0 +1,12 @@
+{
+  "name": "test",
+  "config": {
+    "key": "value",
+    "list": [
+      "item1",
+      "item2"
+    ]
+  }
+  // Trailing comma and comment are not valid JSON
+  "trailing": "value",
+}
