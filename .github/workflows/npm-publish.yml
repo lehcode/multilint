@@ -27,6 +27,13 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
 
+      # The npm bundled with Node 22 predates `npm stage`, so the staging step
+      # fails with `Unknown command: "stage"`. Upgrade before using it.
+      - name: Upgrade npm
+        run: |
+          npm install -g npm@latest
+          npm -v
+
       - name: Install dependencies
         run: npm ci
 
