@@ -10,8 +10,11 @@ LABEL org.opencontainers.image.description="Code quality delegation for AI agent
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Run as non-root user (security best practice)
-USER nobody
+# USER nobody  # moved below: every build step that follows (apt-get, corepack,
+# pip, the gitleaks extraction into /usr/local/bin, chmod) requires root, so
+# dropping privileges here failed the build with apt exit code 100. The drop now
+# happens immediately before ENTRYPOINT, which leaves the runtime unprivileged
+# while letting the image build.
 
 COPY --from=node-tools /usr/local/bin/markdownlint /usr/local/bin/markdownlint
 
@@ -51,5 +54,9 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Make scripts executable
 RUN chmod +x /usr/local/bin/server.py /usr/local/bin/mcp_server.py /usr/local/bin/entrypoint.sh
+
+# Run as non-root user (security best practice). Last instruction before the
+# entrypoint so every build step above still runs as root.
+USER nobody
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
