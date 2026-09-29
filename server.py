@@ -9,6 +9,33 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
+# Default read-only mounts inside the container (see docker-compose.yml).
+DEFAULT_ALLOWED_ROOTS = "/workspace:/multilint"
+
+
+def _resolve_run_dir(cwd: str | None) -> tuple[str | None, str | None]:
+    """Validate a requested run directory against an allowlist of roots.
+
+    Resolves the candidate with realpath() BEFORE comparison to defeat
+    "../.." traversal and symlink escapes, then requires it to equal an
+    allowed root or fall strictly inside one (root + os.sep boundary, so
+    "/workspace-evil" cannot pass as a child of "/workspace").
+
+    Returns (resolved_path, None) on success, or (None, error_message) on
+    rejection. Secure by default: no match, no access.
+    """
+    allowed_env = os.environ.get("MULTILINT_ALLOWED_ROOTS", DEFAULT_ALLOWED_ROOTS)
+    allowed_roots = [os.path.realpath(root) for root in allowed_env.split(":") if root]
+
+    candidate = cwd if cwd else "."
+    resolved = os.path.realpath(candidate)
+
+    for root in allowed_roots:
+        if resolved == root or resolved.startswith(root + os.sep):
+            return resolved, None
+
+    return None, "working directory not permitted"
+
 
 class LintHandler(BaseHTTPRequestHandler):
     """Handle HTTP requests for linting and health checks."""
@@ -44,7 +71,24 @@ class LintHandler(BaseHTTPRequestHandler):
 
             # Determine working directory: explicit cwd takes precedence,
             # otherwise default to "." (server's own directory).
-            run_dir = cwd if cwd else "."
+            # run_dir = cwd if cwd else "."  # replaced: validated via _resolve_run_dir below
+            run_dir, resolve_error = _resolve_run_dir(cwd)
+
+            if resolve_error:
+                # Do not echo the resolved absolute path or allowlist contents
+                # to an unauthenticated caller — generic message only.
+                self._respond(
+                    400,
+                    {
+                        "error": resolve_error,
+                        "return_code": 1,
+                        "stdout": "",
+                        "stderr": "",
+                        "cwd": cwd if cwd else ".",
+                        "target": target,
+                    },
+                )
+                return
 
             if not os.path.isdir(run_dir):
                 self._respond(
