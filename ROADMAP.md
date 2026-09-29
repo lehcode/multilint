@@ -24,24 +24,17 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
 
 **Implementation:** `--format {text,json}` flag added to `lint.sh:42-65`. JSON output renders to stdout with `summary`, `checks`, `return_code`, and `files` fields (lines 650-703). Terminal text output redirected to stderr. MCP tool supports optional `format` parameter.
 
-### 4. Docker Registry Publishing [P2] ❌ Deferred
+### 4. Docker Registry Publishing [P2] ✅ Complete
 
-**Problem:** Users must build locally. No Docker Hub or ghcr.io presence.
+**Implementation:** `.github/workflows/docker-publish.yml`, triggered on `v*` tags. Multi-arch `docker buildx` push to Docker Hub `lehcode/multilint` and `ghcr.io/lehcode/multilint`, both `:<tag>` and `:latest`.
 
-> **Status:** Deferred. Requires CI/CD pipeline, multi-arch build, and registry credentials. Not yet a priority given the Docker-in-Docker usage pattern (services already have Docker; they just build and run locally).
+**Verified published:** Docker Hub carries `latest`, `v0.2.1` and `v0.1.6` (2026-09-29). Anonymous pulls are served, so no credentials are needed to consume it.
 
-**Changes:**
+> **Reclassified from ❌ Deferred.** The deferral said *"not yet a priority given the Docker-in-Docker usage pattern (services already have Docker; they just build and run locally)"*. That reasoning no longer holds, and the entry was also simply out of date — the workflow had already shipped and published successfully.
+>
+> It is now **load-bearing rather than convenient.** Both plugins run `docker run <image>` per invocation, so without a published image every user must clone this repository and build ~506 MB locally before the plugin does anything. The registry is the distribution mechanism, not a nicety.
 
-- Create `.github/workflows/docker-publish.yml`:
-  - Trigger: push to `main`, tags matching `v*`
-  - `docker buildx` for multi-arch (linux/amd64, linux/arm64)
-  - Push to `ghcr.io/<org>/multilint:<tag>`
-  - Update `latest` tag on `main` pushes
-- Add `docker pull` instructions to README
-
-**Impact:** Zero-friction adoption. `docker run ghcr.io/org/multilint:latest` works out of the box.
-
-**Risk:** Low. Standard GitHub Actions pattern.
+**Remaining follow-up:** add `docker pull` instructions to README. The README is stale in other respects too and is tracked separately.
 
 ### 5. Expanded File Type Coverage [P2] ✅ Complete
 
@@ -115,7 +108,7 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
 | P0 | Fix hardcoded paths | ✅ Complete | Low | Critical |
 | P0 | MCP Registry + GEO | ✅ Complete | Low | Critical |
 | P1 | Structured JSON output | ✅ Complete | Medium | High |
-| P2 | Docker publishing | ❌ Deferred | Medium | High |
+| P2 | Docker publishing | ✅ Complete | Medium | Critical |
 | P2 | Expanded file types | ✅ Complete | Medium | Medium |
 | P2 | Security scanning | ✅ Complete | Medium-High | High |
 | P3 | Auto-fix | ⏳ Pending | Medium-High | Medium |
@@ -125,4 +118,8 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
 
 ## Active Work
 
-The remaining items (auto-fix, telemetry) form the next development cycle. Priority order: auto-fix (actionability) → telemetry (observability). Docker publishing is deferred pending a clear registry and CI/CD plan.
+The remaining items (auto-fix, telemetry) form the next development cycle. Priority order: auto-fix (actionability) → telemetry (observability).
+
+Docker publishing is no longer deferred — it shipped, and it is now the distribution mechanism both plugins depend on, so its impact is upgraded from High to Critical. A registry outage or an unpublished tag stops linting for every consumer.
+
+Auto-fix needs re-scoping before it is picked up. Its premise is a writable mount, and the execution model mounts the project read-only on purpose. Delivering it means either a second writable invocation or returning patches for the agent to apply; the latter fits the current design better and keeps the "nothing is auto-fixed" guarantee that the read-only mount enforces.
