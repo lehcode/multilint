@@ -54,17 +54,26 @@ Line numbers below are from PR #12's `lint.sh` (783 lines), which is what `devel
 
 ### Branch 3 — `feat/ephemeral-container-execution` → `develop`
 
-- [ ] **T3.1** Replace `lint()` in `lint_changed.py` with a `docker run` argv builder; delete `path_map()`, `to_container_path()`, `DEFAULT_LINT_URL`, the `urllib` imports and the `# nosec B310` guard.
-- [ ] **T3.2** Resolve the image from `MULTILINT_IMAGE`; no-op silently when `docker` is absent.
-- [ ] **T3.3** Surface `status: "skipped"` to the agent even when `return_code == 0` (`lint_changed.py:284` returns early today).
-- [ ] **T3.4** Emit a one-line notice when the retired `MULTILINT_URL` / `MULTILINT_PATH_MAP` are set.
-- [ ] **T3.5** Delete `claude-plugin/.mcp.json`.
-- [ ] **T3.6** Fix `.opencode/plugins/multilint-lint.js` false green.
-- [ ] **T3.7** `docker-compose.yml` — env-driven mounts, drop personal paths, ports and `MULTILINT_ALLOWED_ROOTS`.
-- [ ] **T3.8** Rewrite `claude-plugin/agents/multilint.md` for the wrapper contract.
-- [ ] **T3.9** New tests for the argv builder — assert on constructed arguments without executing Docker, so CI needs no image.
-- [ ] **T3.10** Confirm `tests/integration/test_http_api.py` still applies (`server.py` survives); do not delete it merely because the plugin stopped using that path.
-- [ ] **T3.11** ROADMAP — reclassify item 4, Docker Registry Publishing, from `❌ Deferred` to required; update Summary Table and Active Work.
+Breaking change. Ships with `feat!:` and a `BREAKING CHANGE:` footer; the surface is listed under *Breaking-change surface* below.
+
+- [x] **T3.1** `lint()` replaced by `build_docker_argv()` + `run_lint()`. `path_map()`, `to_container_path()`, `DEFAULT_LINT_URL`, the `urllib` imports and the `# nosec B310` guard are gone. Path translation is deleted rather than reimplemented: the mount is an identity mount (`source=<root>,target=<root>`), so host and container paths are the same string. *(route: delegated-direct writer boundary not fired — one file, already mapped; done inline)*
+- [x] **T3.2** `resolve_image()` reads `MULTILINT_IMAGE`, defaulting to `lehcode/multilint:latest`. `shutil.which("docker")` absent → silent `return 0`. *(route: inline)*
+- [x] **T3.3** `main()` reports any non-structural `status: "skipped"` even when `return_code == 0`. A check that did not run is not a check that passed. *(route: inline)*
+- [x] **T3.4** `retired_env_in_use()` emits one notice naming whichever of `MULTILINT_URL` / `MULTILINT_PATH_MAP` is set, so the reason they stopped mattering is discoverable instead of silent. *(route: inline)*
+- [x] **T3.5** `claude-plugin/.mcp.json` removed with `git rm`. `plugin.json`'s description updated to state the docker requirement. *(route: inline)*
+- [x] **T3.6** `.opencode/plugins/multilint-lint.js` rewritten. The false green came from `execFile` throwing on docker's non-zero exit; the catch now re-parses `error.stdout`, because a non-zero exit is the *normal* result when lint.sh finds problems. *(route: inline)*
+- [x] **T3.7** `docker-compose.yml` — mount is `${MULTILINT_WORKSPACE:?…}` with no default, ports bound to `127.0.0.1`, `MULTILINT_ALLOWED_ROOTS` derived from the mount target rather than hardcoded. *(route: inline)*
+- [x] **T3.8** `claude-plugin/agents/multilint.md` rewritten: the `docker run` invocation, the JSON field table, and an explicit statement that `status: "skipped"` is not a pass. *(route: inline)*
+- [x] **T3.9** `tests/unit/test_lint_changed.py` — 40 tests, no Docker executed. Loads the hook via `importlib` because the file has no `.py`-importable package. Covers the argv, image resolution, retired env vars, the absence of the HTTP path, result parsing, skipped-check surfacing, and target selection. *(route: inline)*
+- [x] **T3.10** `tests/integration/test_http_api.py` still applies and is unchanged. `server.py` survives branch 3 — it is the MCP-registry surface (ROADMAP item 2), it merely leaves the plugin's hot path. 5 integration tests still pass.
+- [x] **T3.11** ROADMAP item 4 updated — but **not** as the plan said. See the deviation below: it was already shipped, so it moved `❌ Deferred` → `✅ Complete`, not "Deferred → required".
+- [x] **T3.12** *(added)* `MAX_LINT_TARGETS = 25` and `select_targets()`. Not in the plan, and it is a real defect the plan missed: the changed set is everything the repo has dirty, which the triggering edit does not bound. One edit in a tree with 83 dirty files queued 52 lint runs; a larger tree would exceed `RUN_TIMEOUT_SECONDS` and report nothing — an unchecked file then looks exactly like a clean one. The edited file is always kept and the truncation is stated in the notice. Extracted as a pure function so it is unit-testable.
+- [x] **T3.13** *(added)* Windows support stripped on instruction. The `typeof process.getuid === "function"` and `hasattr(os, "getuid")` guards are gone, and `os.pathsep` reverted to a literal `:` in two test assertions. WSL is POSIX and needs nothing extra; native Windows is not a target.
+
+#### Deviations from the approved plan
+
+1. **T3.11 was mis-scoped in the plan.** The plan asked to reclassify ROADMAP item 4 from `❌ Deferred` to *required*. Checking the registries first showed it was already **done**: tags are published and pullable. So item 4 became `✅ Complete` with the published-tag evidence, and the Summary Table row's impact went High → Critical, because every plugin user now runs `docker run`.
+2. **The `gitleaks` acceptance criterion cannot be met on the hook path.** The table below says "`gitleaks` on a mounted git root → Runs". It does not, and no amount of mounting fixes it: `lint.sh` gates gitleaks on `$TARGET_DIR/.git`, and the hook's target is a single *file*, so `TARGET_DIR` is that file's parent. The scope root is mounted and does contain `.git`, but it is not what gets passed to `lint.sh`. Rather than report a structural skip after every single write, both plugins list `gitleaks` in `STRUCTURALLY_SKIPPED` and filter it out, and `agents/multilint.md` documents that git-history scanning belongs to a directory-scoped run. Making it actually run would mean changing `lint.sh`'s gitleaks gate, which is out of this branch's scope.
 
 ## Acceptance criteria
 
@@ -87,6 +96,33 @@ Preserved baseline: `tests/test_files/` → `return_code: 1` with the known fail
 - Pre-change baseline on the tracked tree: `python -m pytest tests/unit` → 59 passed; flake8, `black --check --line-length=120` and shellcheck with `lint.sh`'s exact flags → all rc=0 on 11 Python and 4 shell files.
 - **T0.5 passed 2026-09-29.** `yamllint -c .yamllint` clean on the new workflow; the exact `git ls-files -z | xargs -0 -r` commands run under bash give rc=0 for flake8, black and shellcheck; `npm run build` completes (esbuild → `dist/dual.js` 2.2 kB, then `tsc`). Full multilint pass on `develop-checks.yml` → `All checks passed ✓`.
 - **T2.6 independently reconfirmed.** In the container, `markdownlint --version` fails with `Cannot find package 'commander' imported from /usr/local/bin/markdownlint`, yet `lint.sh` still reports `✓ markdownlint`. The false pass is real.
+
+### Branch 3 — acceptance criteria, measured 2026-09-29/30
+
+| Case | Result |
+| --- | --- |
+| Two sessions editing two unrelated repos at once | **Pass.** Two concurrent invocations against two repositories each mounted only their own scope root and reported only their own findings. Nothing is shared between runs, because nothing outlives the container. |
+| A project in a directory named in no config file | **Pass.** Linted with no compose edit and no restart — the scope root is computed per invocation, so there is no config to name it in. |
+| A 10-file changeset | **Pass.** One container. 4 files → one `docker run`, confirmed from the argv. Measured earlier at T0.1: 6.35 s for ten files in one container vs 8.05 s in ten. |
+| `markdownlint` deliberately broken | **Pass.** Reported as `status: "skipped"` and surfaced to the agent even on `return_code == 0`. |
+| `docker` absent from `PATH` | **Pass.** `shutil.which` returns `None`, hook exits 0 with no output. |
+| Non-git scratch directory | **Pass**, after a corrected test. The first attempt used `/home/takeshi/.claude`, which *is* a git repository with 83 dirty files, so `find_git_root()` resolved there and 52 files were linted — the git path, not the SQLite path. Re-run under `mktemp -d /var/tmp/…`: first edit linted, unchanged second edit suppressed, third edit after a real change linted again. |
+| `gitleaks` on a mounted git root | **Not met, and cannot be on this path.** See deviation 2 above. |
+
+Toolchain verification on the final tree: 111 unit + 5 integration tests pass; `black --check --line-length=120` clean on 13 files; flake8 with the repo's `--extend-ignore` clean; `pylint --disable=C,R,E0401,E1123,W1510` → 10.00/10; shellcheck clean; `node --check` and prettier clean on the rewritten plugin; `yamllint` clean on `docker-compose.yml`; `npm run build` completes.
+
+**A local pass is not evidence unless the flags match.** Running `black`/`flake8` without `--line-length=120` and the repo's `--extend-ignore` reported 8 files needing reformatting and dozens of E501s on untouched files. The CI flags are the contract; a bare invocation answers a different question.
+
+### Breaking-change surface, for the `BREAKING CHANGE:` footer
+
+1. `claude-plugin/.mcp.json` removed — the plugin no longer provides an MCP server.
+2. `MULTILINT_URL` and `MULTILINT_PATH_MAP` are no longer read. A one-line notice fires when either is set.
+3. `docker-compose.yml` no longer publishes `8591`/`8592` to all interfaces and no longer hardcodes `MULTILINT_ALLOWED_ROOTS`. Callers reaching the HTTP API from another host lose it.
+4. `docker` on `PATH` is now a hard requirement for the hook, replacing "a running multilint service".
+5. `agents/multilint.md` drops the `lint_files(path, cwd)` MCP contract.
+6. `.opencode` linting starts actually reporting. A fix, but behaviourally breaking for anyone whose workflow rested on the false green.
+
+No deprecation shim. Keeping `MULTILINT_URL` alive for one release would mean keeping the HTTP path this change exists to delete.
 
 ### T0.8 — branch protection and CodeQL scope, confirmed via the GitHub API
 
@@ -135,4 +171,9 @@ Merge **#13 before #12**. PR #12's head predates `develop-checks.yml`, so for it
 
 ## Next step
 
-Branch 2 — `fix/lint-correctness` off `develop`: T2.1 through T2.7. T2.8 (container rebuild) needs approval because it restarts a service.
+Branch 3 is code-complete and verified. Two things are waiting on the user, neither of which I should decide:
+
+1. **PR #14 (`fix/lint-correctness` → `develop`)** is green on all 5 checks and needs a merge decision. Branch 3's PR is stacked on it, so #14 has to land before branch 3 can target a clean `develop`.
+2. **T2.8 — rebuild the deployed `multilint` container.** Restarts a service, so it needs explicit approval.
+
+Also open: the `develop` → `master` promotion (cuts one release for the whole range, not one per branch — release-please computes a single release per push), an optional GitHub ruleset on the unprotected `develop`, and the `secret_rc` security-scan defect under *Findings recorded, not acted on*, which is still awaiting instruction.
