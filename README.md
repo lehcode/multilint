@@ -265,7 +265,7 @@ The plugin runs linting automatically after every file save — no agent involve
 
 **Flow:**
 
-```
+```text
 Agent writes sample.sh → tool executes → execute.after fires
   → Plugin checks ext=".sh" → matches whitelist
   → Plugin POSTs to /lint with path="./test-lint/"

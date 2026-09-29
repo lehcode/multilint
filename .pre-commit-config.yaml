@@ -49,6 +49,7 @@ repos:
     hooks:
       - id: markdownlint
         args: ['--config', '.markdownlint.json', '--fix']
+        exclude: '^tests/test_files/.*\.md$'
 
   # Secret detection (pre-push only - scans working directory)
   - repo: https://github.com/gitleaks/gitleaks
