@@ -24,18 +24,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Debug Docker Hub token
-        run: |
-          TOKEN="${{ secrets.DOCKER_HUB_TOKEN }}"
-          if [ -z "$TOKEN" ]; then
-            echo "ERROR: DOCKER_HUB_TOKEN is empty!"
-            exit 1
-          else
-            TOKEN_LEN=${#TOKEN}
-            echo "DOCKER_HUB_TOKEN is set (length: $TOKEN_LEN)"
-            echo "First 8 chars: ${TOKEN:0:8}..."
-          fi
-
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -47,19 +35,16 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.GHCR_REGISTRY }}
-          username: ${{ github.actor }}
+          username: ghcr_publisher
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             docker.io/lehcode/multilint:${{ github.ref_name }}
             docker.io/lehcode/multilint:latest
             ghcr.io/${{ github.repository }}:${{ github.ref_name }}
             ghcr.io/${{ github.repository }}:latest
-          labels: |
-            io.modelcontextprotocol.server.name=com.lehcode/multilint
-            io.modelcontextprotocol.server.version=0.1.0
-            org.opencontainers.image.description=Code quality delegation for AI agents - shellcheck, pylint, black, gitleaks via one MCP tool
