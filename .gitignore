@@ -8,3 +8,4 @@ pids/
 dist
 node_modules/
 .npmrc
+.atl

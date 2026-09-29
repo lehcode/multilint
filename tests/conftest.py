@@ -122,6 +122,9 @@ def http_client(tmp_dir: str) -> Generator[object, None, None]:
             **os.environ,
             "LINT_SERVER_PORT": str(port),
             "LINT_SERVER_HOST": "127.0.0.1",
+            # Allow the test's own tmp dir as the only permitted run root
+            # (server default is /workspace:/multilint, which don't exist here).
+            "MULTILINT_ALLOWED_ROOTS": tmp_dir,
         },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

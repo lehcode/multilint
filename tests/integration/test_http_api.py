@@ -36,6 +36,9 @@ def _start_test_server(tmp_dir: str):
             **os.environ,
             "LINT_SERVER_PORT": str(port),
             "LINT_SERVER_HOST": "127.0.0.1",
+            # Allow the test's own tmp dir as the only permitted run root
+            # (server default is /workspace:/multilint, which don't exist here).
+            "MULTILINT_ALLOWED_ROOTS": tmp_dir,
         },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -127,9 +130,10 @@ class TestHTTPApi:
         assert "return_code" in body
         assert "stdout" in body
 
-    def test_lint_with_invalid_cwd(self, test_server):
-        """POST /lint with nonexistent cwd returns 400."""
-        resp = test_server.post("/lint", {"path": ".", "cwd": "/nonexistent/dir"})
+    def test_lint_with_invalid_cwd(self, test_server, tmp_dir):
+        """POST /lint with nonexistent cwd (inside the allowed root) returns 400."""
+        missing = os.path.join(tmp_dir, "nonexistent", "dir")
+        resp = test_server.post("/lint", {"path": ".", "cwd": missing})
         assert resp["status"] == 400
         assert "working directory not found" in resp["body"]["error"]
 

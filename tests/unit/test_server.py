@@ -1,6 +1,7 @@
 """Unit tests for server.py HTTP API."""
 
 # pylint: disable=redefined-outer-name
+import os
 import socket
 
 import pytest
@@ -45,17 +46,48 @@ class TestLintHandler:
         assert resp["status"] == 400
         assert "bad request" in resp["body"]["error"]
 
-    def test_post_lint_default_path(self, http_client):
-        """POST /lint with no path defaults to '.'."""
+    def test_post_lint_default_path(self, http_client, tmp_dir):
+        """POST /lint with no path defaults to '.', resolved to the server's cwd."""
         resp = http_client.post("/lint", {})
         assert resp["status"] == 200
-        assert resp["body"]["cwd"] == "."
+        assert resp["body"]["cwd"] == os.path.realpath(tmp_dir)
 
-    def test_post_lint_invalid_cwd(self, http_client):
-        """POST /lint with nonexistent directory returns 400."""
-        resp = http_client.post("/lint", {"path": ".", "cwd": "/nonexistent"})
+    def test_post_lint_invalid_cwd(self, http_client, tmp_dir):
+        """POST /lint with nonexistent directory (inside the allowed root) returns 400."""
+        missing = os.path.join(tmp_dir, "nonexistent")
+        resp = http_client.post("/lint", {"path": ".", "cwd": missing})
         assert resp["status"] == 400
         assert "working directory not found" in resp["body"]["error"]
+
+    def test_post_lint_path_traversal_rejected(self, http_client, tmp_dir):
+        """POST /lint with a cwd that traverses out of the allowed root returns 400."""
+        traversal = os.path.join(tmp_dir, "..", "..", "etc")
+        resp = http_client.post("/lint", {"path": ".", "cwd": traversal})
+        assert resp["status"] == 400
+        assert "not permitted" in resp["body"]["error"]
+
+    def test_post_lint_absolute_outside_allowlist_rejected(self, http_client):
+        """POST /lint with an absolute cwd outside any allowed root returns 400."""
+        resp = http_client.post("/lint", {"path": ".", "cwd": "/etc"})
+        assert resp["status"] == 400
+        assert "not permitted" in resp["body"]["error"]
+
+    def test_post_lint_prefix_confusion_rejected(self, http_client, tmp_dir):
+        """A cwd that merely shares a string prefix with the allowed root is rejected."""
+        lookalike = tmp_dir + "-evil"
+        resp = http_client.post("/lint", {"path": ".", "cwd": lookalike})
+        assert resp["status"] == 400
+        assert "not permitted" in resp["body"]["error"]
+
+    def test_post_lint_error_body_does_not_leak_paths(self, http_client, tmp_dir):
+        """The rejection response must not echo the resolved path or allowlist contents."""
+        resp = http_client.post("/lint", {"path": ".", "cwd": "/etc"})
+        assert resp["status"] == 400
+        error_text = resp["body"]["error"]
+        assert tmp_dir not in error_text
+        assert "/etc" not in error_text
+        assert "/workspace" not in error_text
+        assert "/multilint" not in error_text
 
     def test_ansi_code_cleans_output(self, http_client):
         """ANSI escape codes are stripped from stdout/stderr."""
