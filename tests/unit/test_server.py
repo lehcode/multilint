@@ -1,12 +1,58 @@
 """Unit tests for server.py HTTP API."""
 
 # pylint: disable=redefined-outer-name
+import contextlib
 import os
 import socket
+import subprocess
+import time
 
 import pytest
+from tests.conftest import SERVER_PY, _TestClient, _find_free_port
 
-SERVER_PY = str(__import__("pathlib").Path(__file__).parent.parent / "server.py")
+# SERVER_PY = str(__import__("pathlib").Path(__file__).parent.parent / "server.py")
+# Replaced: from this module, parent.parent is tests/, so the path resolved to
+# tests/server.py, which does not exist. It was unused until now. conftest.py
+# defines the same constant one level up, where it resolves correctly.
+
+
+@contextlib.contextmanager
+def _server_with_roots(workdir: str, allowed_roots: str):
+    """Start a server in workdir with a specific allowlist, yielding a client.
+
+    The shared http_client fixture always allowlists the server's own working
+    directory, which cannot express the case where the default "." falls
+    outside the allowlist. This launcher takes the two apart.
+    """
+    port = _find_free_port()
+    proc = subprocess.Popen(  # pylint: disable=consider-using-with
+        ["python3", SERVER_PY],
+        cwd=workdir,
+        env={
+            **os.environ,
+            "LINT_SERVER_HOST": "127.0.0.1",
+            "LINT_SERVER_PORT": str(port),
+            "MULTILINT_ALLOWED_ROOTS": allowed_roots,
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        for _ in range(30):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.connect(("127.0.0.1", port))
+                    break
+            except ConnectionRefusedError:
+                time.sleep(0.2)
+        else:
+            proc.terminate()
+            _, stderr = proc.communicate(timeout=5)
+            raise RuntimeError(f"Server failed to start: {stderr.decode(errors='replace')}")
+        yield _TestClient(("127.0.0.1", port))
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
 
 
 class TestLintHandler:
@@ -78,6 +124,31 @@ class TestLintHandler:
         resp = http_client.post("/lint", {"path": ".", "cwd": lookalike})
         assert resp["status"] == 400
         assert "not permitted" in resp["body"]["error"]
+
+    def test_post_lint_symlink_escape_rejected(self, http_client, tmp_dir):
+        """A symlink inside the allowed root pointing outside it is rejected.
+
+        The containment check runs on the realpath, so the link target decides
+        the verdict, not the link's own location.
+        """
+        escape = os.path.join(tmp_dir, "escape")
+        os.symlink("/etc", escape)
+        resp = http_client.post("/lint", {"path": ".", "cwd": escape})
+        assert resp["status"] == 400
+        assert "not permitted" in resp["body"]["error"]
+
+    def test_post_lint_omitted_cwd_is_validated(self, tmp_dir):
+        """An omitted cwd is validated too — the default "." is not a bypass.
+
+        The server runs in tmp_dir but only tmp_dir/allowed is allowlisted, so
+        the default "." resolves outside the allowlist and must be refused.
+        """
+        allowed = os.path.join(tmp_dir, "allowed")
+        os.makedirs(allowed, exist_ok=True)
+        with _server_with_roots(tmp_dir, allowed) as client:
+            resp = client.post("/lint", {})
+            assert resp["status"] == 400
+            assert "not permitted" in resp["body"]["error"]
 
     def test_post_lint_error_body_does_not_leak_paths(self, http_client, tmp_dir):
         """The rejection response must not echo the resolved path or allowlist contents."""
