@@ -38,15 +38,18 @@ Host-native was rejected: `lint.sh` needs bash 4+ (`declare -A` at `:168`, `mapf
 - [x] **T0.7** Retarget PR #12 from `master` to `develop`. Done via REST; `gh pr edit` fails on this repo with a Projects-classic GraphQL deprecation error, so use `gh api -X PATCH .../pulls/12 -f base=develop`.
 - [x] **T0.8** Confirm whether CodeQL default setup covers `develop` (GitHub UI, not a repo file). **It does not** — see below.
 
-### Branch 2 — `fix/lint-correctness` → `develop`
+### Branch 2 — `fix/lint-correctness` → `develop` — **PR #14, all 5 checks green**
 
-- [ ] **T2.1** `lint.sh:754-755` — `"passed"` and `"failed"` both hold the failure count; `passed` is wrong.
-- [ ] **T2.2** `lint.sh:723` — emitter omits `mypy`, `bandit`, `yaml_prettier`, `json_prettier`, `toml_sort`; `ML_CHECKS_COUNT=11` (`:740`) is hardcoded, derive it.
-- [ ] **T2.3** Add `"status": "ok" | "failed" | "skipped"` to the JSON, set `skipped` wherever `warn "… (not installed, skipping)"` fires.
-- [ ] **T2.4** Guard the 6 unguarded tools (`shellcheck`, `flake8`, `black`, `pylint`, `mypy`, `bandit`) like the other 6.
-- [ ] **T2.5** `claude-plugin/scripts/lint_changed.py` — add `from __future__ import annotations`; PEP 604 unions at `:88`, `:102`, `:117`, `:213` currently force Python 3.10+.
-- [ ] **T2.6** `Dockerfile:19` — `markdownlint` is copied without its `node_modules` and has never run; `lint.sh:351-352` reads `$?` after `|| true`, masking the crash as `✓`.
-- [ ] **T2.7** Update `tests/unit/test_lint_sh.py` and `test_lint_sh_extended.py` for the changed JSON contract.
+Line numbers below are from PR #12's `lint.sh` (783 lines), which is what `develop` now carries. `develop`'s pre-#12 copy was 715 lines and had no `mypy`/`bandit` at all — see the ordering note under Merge order.
+
+- [x] **T2.1** `"passed"` and `"failed"` both held the failure count. `passed` now means clean units, which needs a denominator, so each check records how many units it received (`total`). *(route: inline — single file, already understood)*
+- [x] **T2.2** Emitter enumerated 11 names and omitted `mypy`, `bandit`, `yaml_prettier`, `json_prettier`, `toml_sort`. Now driven by a canonical `ALL_CHECKS` array; `ML_CHECKS_COUNT` derived from it. *(route: inline)*
+- [x] **T2.3** Added `"status": "ok" | "failed" | "skipped"` plus `summary.checks_skipped`. *(route: inline)*
+- [x] **T2.4** Guarded `shellcheck`, `flake8`, `pylint`, `black`, `mypy`, `bandit` with `command -v`. *(route: inline)*
+- [x] **T2.5** `from __future__ import annotations` added to `lint_changed.py`. Not executed on a 3.9 interpreter — none available here; the mechanism is PEP 563 vs PEP 604. *(route: inline)*
+- [x] **T2.6** `Dockerfile` now copies `/usr/local/lib/node_modules` and recreates the launcher as a symlink; the `|| true` masking the exit status is gone. *(route: inline)*
+- [x] **T2.7** 11 new tests in `test_lint_sh_extended.py`, asserting contract invariants rather than tool verdicts. All 11 verified to fail against the previous `lint.sh`. *(route: inline)*
+- [x] **T2.9** *(added)* Pinned dev dependencies in `requirements-dev.txt`, installed from it in both CI jobs. Unpinned installs had made CI non-deterministic. *(route: inline)*
 - [ ] **T2.8** Rebuild the container so the allowlist, `USER nobody` and current `lint.sh` actually run. *(needs user approval — restarts a service)*
 
 ### Branch 3 — `feat/ephemeral-container-execution` → `develop`
@@ -92,6 +95,21 @@ Preserved baseline: `tests/test_files/` → `return_code: 1` with the known fail
 - **Consequence:** `develop` is entirely unprotected. `develop-checks.yml` will run on PRs into it but cannot block a merge, because no ruleset requires its checks. `code_quality` and `code_scanning` are enforced only at the `develop` → `master` promotion. Adding a ruleset on `develop` requiring the three new checks is a GitHub-UI decision left to the user.
 
 ## Findings recorded, not acted on
+
+- **The hardcoded-secrets scan silently misses almost every secret.** All three security loops reuse a status variable that is only assigned on the *no-match* branch:
+
+  ```bash
+  secret_output=$(grep -Eni "…" "$f" 2>&1) || secret_rc=$?
+  if [ "${secret_rc:-0}" -eq 0 ]; then   # report
+  ```
+
+  `grep` returns 0 when it *finds* something, so `|| secret_rc=$?` fires only when a file is clean — setting `secret_rc=1`. It is never reset, so after the first clean file every later file with a secret is skipped. Reproduced in isolation: with a clean file scanned first, a following file containing `password="hunter2"` matches (non-empty `secret_output`) and is **not reported**. Only a match in the first scanned file, or one immediately after another match, is caught. Affects `secret_rc`, `py_secret_rc` and `dangerous_rc` identically.
+
+  Not fixed: out of the approved T2.x scope, and CLAUDE.md requires reporting rather than unilaterally changing existing code. This is the most serious defect found so far — a security check reporting clean while holding a match in hand.
+
+- **`Dockerfile:3` installs prettier into the `node-tools` stage, and `:30` installs it again via corepack in the final stage.** T2.6 now copies the whole `node_modules` tree out of `node-tools`, so the corepack line is redundant. Left in place rather than removed.
+
+- **CI's shellcheck is unpinned apt.** The runner carries 0.9.0; upstream is 0.11.0. Unlike gitleaks it has no pinned release asset in the workflow, so a runner-image bump can change the verdict. Recorded in the workflow comment.
 
 - **`yaml_prettier` fails on all four pre-existing workflows.** prettier defaults to double-quoted scalars while every existing workflow uses single quotes, so `gitleaks.yml` fails the repo's own check independently of this change. `develop-checks.yml` was written double-quoted so it does not add to the violation; the existing files were deliberately left alone rather than restyled.
 - **`gitleaks.yml` has no `---` document start**, which yamllint warns about. Pre-existing, untouched.
