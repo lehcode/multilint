@@ -1,0 +1,10 @@
+{
+  "name": "multilint",
+  "description": "Lints changed files through the multilint service after every edit, and adds a linting subagent plus the multilint MCP server.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Anton Repin"
+  },
+  "homepage": "https://github.com/lehcode/multilint",
+  "license": "MIT"
+}
