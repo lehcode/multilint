@@ -192,7 +192,7 @@ Releases are automated with [release-please](https://github.com/googleapis/relea
 - Bumps `version` in `package.json`
 - Updates `CHANGELOG.md`
 
-The new tag then triggers `.github/workflows/docker-publish.yml`, which builds and pushes Docker images to Docker Hub and ghcr.io.
+The new tag then triggers `.github/workflows/docker-publish.yml`, which builds and pushes Docker images to Docker Hub and ghcr.io. Publishing the release triggers `.github/workflows/npm-publish.yml`, which publishes `@lehcode/multilint` to npm with [provenance](https://docs.npmjs.com/generating-provenance-statements) attestation. That job requires an `NPM_TOKEN` secret holding an npm automation token.
 
 The project is pre-1.0, so `bump-minor-pre-major` is enabled in `release-please-config.json`: a `feat:` commit bumps the minor version (e.g. `0.1.6` → `0.2.0`) instead of the patch.
 
