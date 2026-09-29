@@ -132,6 +132,16 @@ No deprecation shim. Keeping `MULTILINT_URL` alive for one release would mean ke
 
 ## Findings recorded, not acted on
 
+- **The scope root is unbounded, and branch 3 gives it teeth.** Scope root is the enclosing git repository, else the edited file's *parent directory*, and branch 3 bind-mounts it into the container. For an edit to a file sitting directly in a non-git system directory that means the whole directory is mounted. This is not hypothetical: `~/.local/state/multilint/changes.db` holds a complete recursive walk of `/etc` — 37 lintable files across `init.d`, `profile.d`, `rc*.d`, `wpa_supplicant`, `docker`, `containerd`, `nvidia-container-runtime`, `gdm3` — which only happens if `candidates_under(Path("/etc"))` ran, i.e. the scope root was `/etc`.
+
+  Mitigations already in place: the mount is `readonly`, the container has `--network none`, and it runs as the invoking uid rather than root. So the exposure is "a throwaway offline container can read this directory", not exfiltration. But the hook also hashes up to `MAX_SCAN_FILES` (2000) files of it, which is work nobody asked for, and the linters then read system configuration.
+
+  **The table has no timestamp column, so I cannot date those rows and will not guess** whether they came from a normal edit or from manual hook testing earlier in this work. Either way the structural path exists in the shipped code.
+
+  Not fixed, because the fix is a design decision rather than a correction: refuse a scope root outside the user's home, require a project marker (`.git`, `package.json`, `pyproject.toml`) before mounting anything, or cap the mount at the edited file's directory only. Also note `SKIP_DIRS` blocks venvs by *name* (`venv`, `.venv`), so a venv called anything else is walked in full — a throwaway `blackvenv/` in a scratchpad put 542 files in one changed set, which is how this was noticed. Testing for `pyvenv.cfg` would be robust; the name list is not. `SKIP_DIRS` and the non-git walk are pre-existing code the plan explicitly left unchanged.
+
+  What did work: `MAX_LINT_TARGETS` caught it. The hook reported *"checked 25 of 542 changed files (517 not checked, limit 25 per run)"* instead of queueing 542 lint runs and timing out silently. That is T3.12 doing exactly the job it was added for, observed in the wild rather than in a test.
+
 - **The hardcoded-secrets scan silently misses almost every secret.** All three security loops reuse a status variable that is only assigned on the *no-match* branch:
 
   ```bash
