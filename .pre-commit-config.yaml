@@ -33,7 +33,7 @@ repos:
     hooks:
       - id: shellcheck
         args: ['-e', 'SC1091,SC2155,SC2086', '-S', 'style']
-        exclude: '^tests/fixtures/.*$'
+        exclude: '^(?:tests/fixtures/|tests/test_files/).*'
 
   # YAML linting
   - repo: https://github.com/adrienverge/yamllint
