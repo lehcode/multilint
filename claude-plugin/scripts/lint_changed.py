@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
-"""PostToolUse hook body: lint the files that actually changed, via the multilint HTTP API.
+"""PostToolUse hook body: lint the files that actually changed, in a throwaway container.
 
-Reads the hook payload on stdin, works out which files changed, translates host paths to the
-container paths multilint can see, and reports only failing checks back to Claude.
+Reads the hook payload on stdin, works out which files changed, runs them through one ephemeral
+`docker run`, and reports failing or skipped checks back to Claude.
+
+There is no host-to-container path translation, because the bind mount is an identity mount:
+`source=<scope root>,target=<scope root>`. The host path and the container path are the same string,
+so there is nothing to map and nothing to get wrong. The previous design posted host paths to an
+HTTP API listening on a fixed port with fixed mounts, which meant a project in an unmounted
+directory was silently reported as clean, and N agents in N directories could not be served at all.
+
+Scope root is the enclosing git repository when there is one, otherwise the edited file's directory.
+It is the only thing mounted, read-only.
+
+One container per hook invocation, not per file: container startup is ~0.36s over a warm in-process
+call, so a ten-file changeset amortises it once (measured 6.35s) instead of ten times (8.05s).
 
 Change detection has two modes:
 
@@ -16,8 +28,11 @@ protected-directory permission prompt even under bypassPermissions
 (github.com/anthropics/claude-code/issues/41156), which would prompt on every edit, and in Cowork
 that path is per-conversation (issue #51398).
 
-Always exits 0. A missing server, an unmapped path or an empty changeset is a silent no-op, matching
-the non-blocking behaviour of the OpenCode plugin.
+POSIX only. WSL counts and needs nothing extra; native Windows is not a target, so `os.getuid()` is
+called directly rather than guarded.
+
+Always exits 0. A missing `docker`, an unreadable payload or an empty changeset is a silent no-op,
+matching the non-blocking behaviour of the OpenCode plugin.
 """
 
 # Required, not stylistic. This module runs on the *host* interpreter, which the
@@ -29,12 +44,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 LINTABLE_SUFFIXES = {".sh", ".bash", ".py", ".md", ".yaml", ".yml", ".json", ".toml"}
@@ -46,8 +59,39 @@ SKIP_DIRS = {"node_modules", "venv", ".venv", "__pycache__", "cache", "output", 
 # Upper bound on files hashed in one non-git invocation, so a hook on a huge tree stays responsive.
 MAX_SCAN_FILES = 2000
 
-DEFAULT_LINT_URL = "http://localhost:8591/lint"
-REQUEST_TIMEOUT_SECONDS = 90
+# Upper bound on files handed to one container. The changed set is whatever the repository has dirty,
+# which is not bounded by the edit that triggered the hook: editing one file in a tree with 83 dirty
+# files queues 52 lint runs, and a larger tree would run past RUN_TIMEOUT_SECONDS and report nothing
+# at all. Truncating and saying so beats timing out silently. The edited file is always kept.
+MAX_LINT_TARGETS = 25
+
+# Published on Docker Hub, which serves anonymous pulls; ghcr.io carries the same tags but can
+# require a token. Override with MULTILINT_IMAGE to test a local build.
+DEFAULT_IMAGE = "lehcode/multilint:latest"
+
+CONTAINER_LINT_SH = "/usr/local/bin/lint.sh"
+
+# Wall-clock ceiling for the whole container, not per file. Generous because a first pull has to
+# fetch ~506MB, and a timeout here means the edit is reported as unchecked rather than clean.
+RUN_TIMEOUT_SECONDS = 300
+
+# Resource caps mirroring docker-compose.yml, so the hook cannot starve the machine it runs on.
+MEMORY_LIMIT = "2g"
+CPU_LIMIT = "2"
+
+# Separator printed to stdout before each file's JSON document, so one container run producing N
+# documents can be split back apart. Chosen to be something no linter emits.
+FILE_MARKER = "===MULTILINT-FILE==="
+
+# Read but no longer honoured. Kept only to tell the user why their configuration stopped taking
+# effect, instead of silently ignoring it.
+RETIRED_ENV_VARS = ("MULTILINT_URL", "MULTILINT_PATH_MAP")
+
+# gitleaks scans git history, and lint.sh only runs it when "$TARGET_DIR/.git" exists. Targets here
+# are individual files, so that test can never pass and the check is always reported skipped. That
+# is structural rather than informative, so it is filtered out of the skipped set to avoid emitting
+# the same non-finding after every single edit. Directory-scoped runs still exercise it.
+STRUCTURALLY_SKIPPED = frozenset({"gitleaks"})
 
 # Cap on the text handed back to Claude. The full lint output of a failing directory runs to several
 # kilobytes; only the failing lines are worth the context.
@@ -70,39 +114,86 @@ def state_dir() -> Path:
     return base / "multilint"
 
 
-def path_map() -> list[tuple[Path, str]]:
-    """Host-prefix to container-root pairs, longest host prefix first.
+def resolve_image() -> str:
+    """Image to run. MULTILINT_IMAGE overrides the published default."""
+    return os.environ.get("MULTILINT_IMAGE") or DEFAULT_IMAGE
 
-    MULTILINT_PATH_MAP overrides the default, as "host:container,host:container".
+
+def retired_env_in_use() -> list[str]:
+    """Names of retired variables the user still has set."""
+    return [name for name in RETIRED_ENV_VARS if os.environ.get(name)]
+
+
+def container_program() -> str:
+    """The bash program run inside the container.
+
+    One lint.sh per file, in one container. lint.sh takes a single target and has no multi-target
+    mode, and adding one would change a script the image, the MCP server and the HTTP API all share.
+
+    Each document is preceded by a marker line so the combined stdout can be split back into one
+    result per file. In JSON mode lint.sh sends human-readable output to stderr and only JSON to
+    stdout, so stdout stays parsable.
+
+    `|| rc=1` rather than `set -e`: a failing file must not stop the remaining files from being
+    checked, but the overall exit status should still reflect that something failed.
     """
-    raw = os.environ.get("MULTILINT_PATH_MAP")
-    if raw:
-        pairs = []
-        for entry in raw.split(","):
-            host, _, container = entry.partition(":")
-            if host and container:
-                pairs.append((Path(host).expanduser(), container))
-    else:
-        home = Path.home()
-        pairs = [
-            (home / "lan-hosts", "/workspace"),
-            (home / "docker-compose.d" / "multilint", "/multilint"),
-        ]
-    return sorted(pairs, key=lambda pair: len(str(pair[0])), reverse=True)
+    return (
+        "rc=0\n"
+        'for f in "$@"; do\n'
+        f'    printf "%s%s\\n" "{FILE_MARKER}" "$f"\n'
+        # Also on stderr, because that is where lint.sh sends the human-readable findings in JSON
+        # mode. Without a marker there, the detail for N files arrives as one undivided blob and
+        # cannot be attributed to the file it belongs to.
+        f'    printf "%s%s\\n" "{FILE_MARKER}" "$f" >&2\n'
+        f'    bash {CONTAINER_LINT_SH} "$f" --format json || rc=1\n'
+        "done\n"
+        "exit $rc\n"
+    )
 
 
-def to_container_path(host_path: Path) -> tuple[str, str] | None:
-    """Map a host path to (container mount root, path relative to that root).
+def build_docker_argv(scope_root: Path, relative_paths: list[str], image: str | None = None) -> list[str]:
+    """Assemble the full `docker run` argv.
 
-    Returns None when the path is under no mount, because the file does not exist in the container.
+    Kept free of side effects so tests can assert on the exact arguments without Docker present.
+
+    The mount is an identity mount — source and target are the same absolute path — which is the
+    whole point of this design: the container sees the file at the path the host calls it, so no
+    translation table exists to be wrong or out of date.
+
+    `--mount` rather than `-v`: the `-v src:dst:opts` form is colon-delimited, and in zsh
+    `"$PWD:$PWD:ro"` silently becomes `.../multilint:.../multilinto`, because `:r` is a parameter
+    modifier that applies even inside double quotes. That produced a container mounted read-write at
+    the wrong target, an empty working directory, and a lint run that reported success having
+    examined nothing. --mount takes named keys and cannot be misread that way.
     """
-    for host_prefix, container_root in path_map():
-        try:
-            relative = host_path.relative_to(host_prefix)
-        except ValueError:
-            continue
-        return container_root, relative.as_posix()
-    return None
+    root = str(scope_root)
+    argv = [
+        "docker",
+        "run",
+        "--rm",
+        # No linter needs the network. gitleaks reads local history; every other tool reads files.
+        "--network",
+        "none",
+        "--memory",
+        MEMORY_LIMIT,
+        "--cpus",
+        CPU_LIMIT,
+        "--mount",
+        f"type=bind,source={root},target={root},readonly",
+        "--workdir",
+        root,
+        # lint.sh resolves .multilint.json and .markdownlint.json relative to the working directory,
+        # so the scope root has to be the working directory for per-project config to apply.
+        "--entrypoint",
+        "bash",
+        # Run as the invoking user so nothing in the container acts as root, whatever USER the image
+        # declares. POSIX only, which includes WSL; native Windows is not a target.
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+    ]
+    argv += [image or resolve_image(), "-c", container_program(), "_"]
+    argv += relative_paths
+    return argv
 
 
 def edited_file_from_payload(payload: dict) -> Path | None:
@@ -216,32 +307,94 @@ def changed_via_sqlite(directory: Path) -> set[Path]:
     return changed
 
 
-def lint(container_root: str, relative_path: str) -> dict | None:
-    """POST one file to the multilint API. None when the service cannot be reached.
+def split_stream(text: str) -> dict[str, str]:
+    """Split a marker-delimited stream into {file: body}."""
+    sections: dict[str, str] = {}
+    for block in text.split(FILE_MARKER):
+        if not block.strip():
+            continue
+        name, _, body = block.partition("\n")
+        sections[name.strip()] = body
+    return sections
 
-    cwd is the mount root so that lint.sh's relative config lookups resolve; markdownlint only
-    picks up .markdownlint.json when it sits in the working directory.
+
+def run_lint(scope_root: Path, relative_paths: list[str]) -> list[tuple[str, dict, str]]:
+    """Run one container over every changed file.
+
+    Returns (file, JSON document, human-readable detail) per file. A document that will not parse is
+    dropped rather than guessed at, on the principle that a malformed result should look like
+    "nothing to report" and not like a finding.
+
+    An empty list means nothing could be determined — no Docker, no image, a timeout — and is
+    deliberately indistinguishable from "no findings" to the caller, because the hook must never
+    block an edit on infrastructure trouble.
     """
-    url = os.environ.get("MULTILINT_URL", DEFAULT_LINT_URL)
-
-    # MULTILINT_URL comes from the environment, so restrict the scheme before opening it.
-    # Without this, a file:// or custom-scheme value would be honoured by urlopen.
-    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
-        return None
-
-    body = json.dumps({"path": relative_path, "cwd": container_root}).encode()
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    if shutil.which("docker") is None:
+        return []
     try:
-        # B310 is suppressed because the scheme guard above already restricts this to http/https.
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:  # nosec B310
-            return json.loads(response.read().decode())
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
-        return None
+        proc = subprocess.run(
+            build_docker_argv(scope_root, relative_paths),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    details = split_stream(proc.stderr)
+    results: list[tuple[str, dict, str]] = []
+    for name, body in split_stream(proc.stdout).items():
+        try:
+            document = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(document, dict):
+            results.append((name, document, details.get(name, "")))
+    return results
+
+
+def failing_checks(document: dict) -> list[str]:
+    """Names of checks that found something, as "name: N failure(s)"."""
+    reported = []
+    for name, check in sorted((document.get("checks") or {}).items()):
+        if not isinstance(check, dict):
+            continue
+        if check.get("status") == "failed" or (check.get("failed") or 0) > 0:
+            count = check.get("failed") or 0
+            reported.append(f"{name}: {count} failure(s)")
+    return reported
+
+
+def skipped_checks(document: dict) -> list[str]:
+    """Checks that did not run, excluding the ones that structurally never can.
+
+    A skipped check is not a pass, and before this the two were indistinguishable: a missing tool
+    reported zero failures exactly like a clean run. Surfacing it matters even when return_code is
+    0, which is why the caller cannot simply short-circuit on a zero exit.
+    """
+    names = document.get("summary", {}).get("checks_skipped")
+    if not isinstance(names, list):
+        return []
+    return [n for n in names if isinstance(n, str) and n not in STRUCTURALLY_SKIPPED]
+
+
+def select_targets(all_targets: list[str], edited: str | None) -> tuple[list[str], int]:
+    """Trim the changed set to MAX_LINT_TARGETS, keeping the edited file. Returns (kept, dropped).
+
+    The changed set is whatever the repository has dirty, which the triggering edit does not bound.
+    One edit in a tree with 83 dirty files queues 52 lint runs; a larger tree runs past the container
+    timeout and reports nothing at all, which is the worst outcome available. Truncating and saying so
+    is strictly better than a silent timeout.
+    """
+    if len(all_targets) <= MAX_LINT_TARGETS:
+        return list(all_targets), 0
+    if edited in all_targets:
+        others = [path for path in all_targets if path != edited]
+        kept = [edited] + others[: MAX_LINT_TARGETS - 1]
+    else:
+        kept = list(all_targets[:MAX_LINT_TARGETS])
+    return kept, len(all_targets) - len(kept)
 
 
 def failing_lines(stdout: str) -> list[str]:
@@ -268,48 +421,101 @@ def main() -> int:
 
     git_root = find_git_root(edited.parent)
     if git_root is not None:
+        scope_root = git_root
         changed = changed_under_git(git_root)
     else:
+        scope_root = edited.parent
         changed = changed_via_sqlite(edited.parent)
     changed.add(edited)
 
-    targets: dict[tuple[str, str], None] = {}
+    # Paths are made relative to the scope root because that is the working directory inside the
+    # container. Anything outside the scope root is dropped: it is not mounted, so linting it would
+    # report a missing file rather than a finding. Under git that is rare — the git root encloses the
+    # changed set by construction — but an edit can still name a file elsewhere.
+    targets: dict[str, None] = {}
     for candidate in sorted(changed):
         if candidate.suffix not in LINTABLE_SUFFIXES or not candidate.is_file():
             continue
-        mapped = to_container_path(candidate)
-        if mapped is not None:
-            targets[mapped] = None
+        try:
+            relative = candidate.resolve().relative_to(scope_root.resolve())
+        except (ValueError, OSError):
+            continue
+        targets[relative.as_posix()] = None
     if not targets:
         return 0
 
-    findings: list[str] = []
-    failed = 0
-    for container_root, relative_path in targets:
-        result = lint(container_root, relative_path)
-        if result is None or result.get("return_code") == 0:
-            continue
-        failed += 1
-        lines = failing_lines(result.get("stdout") or "")
-        if lines:
-            findings.append(f"{relative_path}:\n" + "\n".join(lines))
+    # Keep the edited file whatever else is dropped: it is the one just touched, and the only one the
+    # user is certain to care about right now.
+    edited_relative = None
+    try:
+        edited_relative = edited.resolve().relative_to(scope_root.resolve()).as_posix()
+    except (ValueError, OSError):
+        pass
 
-    if not failed:
+    selected, truncated = select_targets(list(targets), edited_relative)
+
+    results = run_lint(scope_root, selected)
+    if not results:
         return 0
 
-    context = "\n\n".join(findings)[:MAX_CONTEXT_CHARS]
-    if not context:
-        context = "multilint reported failing checks but produced no parsable output."
+    findings: list[str] = []
+    skipped: set[str] = set()
+    failed = 0
+    for name, document, detail in results:
+        skipped.update(skipped_checks(document))
+        if document.get("return_code") == 0:
+            continue
+        failed += 1
+        lines = failing_lines(detail)
+        if not lines:
+            # Fall back to the structured counts when the human output carried no marked lines.
+            lines = failing_checks(document)
+        if lines:
+            findings.append(f"{name}:\n" + "\n".join(lines))
+
+    notices: list[str] = []
+    if failed:
+        context = "\n\n".join(findings)[:MAX_CONTEXT_CHARS]
+        if not context:
+            context = "multilint reported failing checks but produced no parsable output."
+        notices.append(f"multilint found failing checks in {failed} changed file(s).\n\n{context}")
+    if skipped:
+        # Reported even when everything passed. A check that did not run is not a check that passed,
+        # and the old contract could not tell the two apart.
+        notices.append(
+            "multilint could not run these checks, so the files are unverified for them: " + ", ".join(sorted(skipped))
+        )
+    if truncated:
+        # Said out loud rather than silently dropped: the whole point of this change is that an
+        # unchecked file must never look like a checked one.
+        notices.append(
+            f"multilint checked {len(selected)} of {len(targets)} changed files "
+            f"({truncated} not checked, limit {MAX_LINT_TARGETS} per run). "
+            "Commit or stash unrelated work to narrow the changed set."
+        )
+    for name in retired_env_in_use():
+        notices.append(
+            f"{name} is set but no longer used. multilint now runs a container per invocation "
+            "instead of calling an HTTP API, so there is no URL or path map to configure. "
+            "Set MULTILINT_IMAGE to choose a different image."
+        )
+
+    if not notices:
+        return 0
+
+    summary = []
+    if failed:
+        summary.append(f"{failed} file(s) with failing checks")
+    if skipped:
+        summary.append(f"{len(skipped)} check(s) skipped")
+
     json.dump(
         {
             "hookSpecificOutput": {
                 "hookEventName": "PostToolUse",
-                "additionalContext": (
-                    f"multilint found failing checks in {failed} changed file(s). "
-                    f"Fix them before continuing.\n\n{context}"
-                ),
+                "additionalContext": "\n\n".join(notices),
             },
-            "systemMessage": f"multilint: {failed} file(s) with failing checks",
+            "systemMessage": "multilint: " + (", ".join(summary) if summary else "configuration notice"),
         },
         sys.stdout,
     )

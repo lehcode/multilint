@@ -485,7 +485,7 @@ class TestBrokenToolIsNotAPass:
         (proj / "doc.md").write_text("# Title\n\nBody.\n")
         bin_dir = self._shim(tmp_dir, "markdownlint", 1, "Cannot find package 'commander'")
 
-        data = _lint_json(proj, env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"})
+        data = _lint_json(proj, env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
 
         assert data["checks"]["markdownlint"]["status"] == "failed"
         assert data["checks"]["markdownlint"]["failed"] == 1
@@ -498,7 +498,7 @@ class TestBrokenToolIsNotAPass:
         (proj / "doc.md").write_text("# Title\n\nBody.\n")
         bin_dir = self._shim(tmp_dir, "markdownlint", 0, "")
 
-        data = _lint_json(proj, env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"})
+        data = _lint_json(proj, env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
 
         assert data["checks"]["markdownlint"]["status"] == "ok"
         assert data["checks"]["markdownlint"]["total"] == 1
