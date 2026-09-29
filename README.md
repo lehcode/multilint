@@ -242,29 +242,80 @@ The MCP tools always return structured results regardless of this flag.
 - `mypy` installed for dev testing only (not used in linting)
 - `bandit` installed but lint.sh uses grep-based security scanning
 
-## OpenCode Plugin
+## OpenCode Integration
 
-MultiLint ships with an OpenCode V2 plugin (`./.opencode/plugins/multilint-lint.js`) that runs linting automatically after file saves.
+MultiLint integrates with OpenCode through three mechanisms, configured in `opencode.json`:
 
-### How It Works
+### 1. Plugin — Automatic linting on file save
 
-1. Listens for `execute.after` events on tool executions
-2. Extracts the file path from the tool input
-3. Checks whether the file extension is lintable: `.sh`, `.bash`, `.py`, `.md`, `.yaml`, `.yml`, `.json`, `.toml`
-4. Calls the multilint HTTP API (`POST /lint`) with the file's parent directory
-5. Any errors are appended to the tool result so the agent sees them in context
-6. Silent if the server is unreachable or no errors are found
+```json
+"plugin": ["./.opencode/plugins/multilint-lint.js"]
+```
+
+The plugin runs linting automatically after every file save — no agent involvement needed.
+
+**How it works:**
+
+1. OpenCode loads `multilint-lint.js` as a V2 plugin (`export default { id, setup }`)
+2. The plugin hooks into `ctx.tool.hook("execute.after", ...)` — fires after every tool execution
+3. Extracts the file path from tool input, checks extension against whitelist
+4. Calls `POST http://localhost:8591/lint` with the file's parent directory
+5. Errors are **appended to the tool result** so the agent sees them in context
+6. Silent if server is unreachable or no errors found
+
+**Flow:**
+
+```
+Agent writes sample.sh → tool executes → execute.after fires
+  → Plugin checks ext=".sh" → matches whitelist
+  → Plugin POSTs to /lint with path="./test-lint/"
+  → Plugin appends errors to tool result
+  → Agent sees: "multilint reported errors in sample.sh. Fix them before continuing."
+```
+
+**Lintable extensions:** `.sh`, `.bash`, `.py`, `.md`, `.yaml`, `.yml`, `.json`, `.toml`
+
+### 2. MCP Server — Manual linting via `lint_files()`
+
+```json
+"mcp": {
+  "servers": {
+    "multilint": {
+      "type": "remote",
+      "url": "http://localhost:8592/mcp"
+    }
+  }
+}
+```
+
+Connects the OpenCode agent to the multilint MCP server on port 8592 (streamable-http transport). The agent calls `multilint.lint_files(path, cwd)` to run the full pipeline on any directory and receives structured results (`stdout`, `stderr`, `return_code`).
+
+Use this for **explicit/manual linting** or when the agent needs to lint an arbitrary directory not being edited.
+
+### 3. Agent — Dedicated system prompt
+
+```json
+"agent": {
+  "multilint": {
+    "description": "Run code quality linting via the multilint service.",
+    "prompt": "agents/multilint.md"
+  }
+}
+```
+
+When the multilint agent is selected, OpenCode loads `agents/multilint.md` as the system prompt. This gives the agent instructions on when and how to use the multilint MCP tools.
 
 ### Configuration
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `MULTILINT_HOST` | `http://localhost:8591` | Multilint HTTP API base URL |
+| `MULTILINT_HOST` | `http://localhost:8591` | Multilint HTTP API base URL (plugin only) |
 
 ### Limitations
 
-- Only hooks into tool executions; not triggered by file watchers or manual edits
-- Non-blocking — failures do not prevent the save from completing
+- Plugin only hooks into tool executions; not triggered by file watchers or external edits
+- Plugin is non-blocking — failures do not prevent the save from completing
+- TOML check has a known CLI bug (`--check --sort-keys` flags conflict in `lint.sh` line 471)
 
 ## Troubleshooting
 
