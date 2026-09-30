@@ -272,14 +272,66 @@ class TestThresholdConfig:
 class TestGitleaks:
     """Tests for gitleaks git history secret detection."""
 
-    def test_gitleaks_no_git(self, tmp_dir):
-        """Gitleaks skipped when no .git directory."""
+    def test_gitleaks_runs_without_git_instead_of_skipping(self, tmp_dir):
+        """No .git is no longer a skip.
+
+        It used to print "gitleaks (.git not found, skipping)". gitleaks supports --no-git, which
+        "treat[s] git repo as a regular directory and scan[s] those files", so the working copy can
+        be scanned even with no history — and the plugins pass a single file, which never has a .git
+        beneath it, so the old gate meant gitleaks reported skipped after every edit and in practice
+        never ran at all.
+        """
         result = subprocess.run(
             ["bash", str(LINT_SH), tmp_dir],
             capture_output=True,
             text=True,
         )
-        assert "gitleaks (.git not found, skipping)" in result.stdout
+        assert ".git not found, skipping" not in result.stdout
+        assert "gitleaks: 0 findings" in result.stdout
+
+    def test_gitleaks_finds_a_secret_without_git(self, tmp_dir):
+        """The point of the --no-git branch: a real verdict, not an absence of one.
+
+        The token is assembled at runtime rather than written as one literal. Spelled out in full it
+        matches gitleaks' own github-pat rule, so this repository's gitleaks job flagged this very
+        file -- correctly, since a scanner that ignores test fixtures is a scanner with a blind spot.
+        Splitting the prefix keeps the source clean while the file written to disk still carries the
+        complete token, which is what the assertion needs.
+        """
+        token = "ghp" + "_" + "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5"
+        Path(tmp_dir, "leak.md").write_text(f"token: {token}\n", encoding="utf-8")
+        result = subprocess.run(
+            ["bash", str(LINT_SH), tmp_dir],
+            capture_output=True,
+            text=True,
+        )
+        assert "gitleaks: 1 findings" in result.stdout
+
+    def test_gitleaks_uses_history_when_a_repository_is_present(self, tmp_dir):
+        """A repository must still be scanned as a repository, not downgraded to --no-git."""
+        subprocess.run(["git", "init", "-q", tmp_dir], check=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", str(LINT_SH), tmp_dir],
+            capture_output=True,
+            text=True,
+        )
+        assert ".git not found, skipping" not in result.stdout
+        assert "gitleaks: 0 findings" in result.stdout
+
+    def test_gitleaks_finds_a_repository_from_a_file_target(self, tmp_dir):
+        """The plugin path. TARGET_DIR is a file, so "$TARGET_DIR/.git" could never exist and the
+        enclosing repository has to be found by walking up from the file's directory."""
+        subprocess.run(["git", "init", "-q", tmp_dir], check=True, capture_output=True)
+        nested = Path(tmp_dir, "src")
+        nested.mkdir()
+        target = nested / "a.md"
+        target.write_text("# title\n", encoding="utf-8")
+        result = subprocess.run(
+            ["bash", str(LINT_SH), str(target)],
+            capture_output=True,
+            text=True,
+        )
+        assert ".git not found, skipping" not in result.stdout
 
     def test_gitleaks_disabled(self, sample_project_empty):
         """MULTILINT_GITLEAKS_CHECK=off skips gitleaks."""
