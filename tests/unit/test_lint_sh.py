@@ -3,9 +3,26 @@
 # pylint: disable=redefined-outer-name
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
+import pytest
+
 LINT_SH = Path(__file__).parent.parent.parent / "lint.sh"
+
+
+@pytest.fixture(autouse=True)
+def _ml_isolated_cwd(monkeypatch):
+    """Run every test in this module from an empty directory.
+
+    See test_lint_sh_extended.py's fixture of the same name for the reason:
+    lint.sh now reads $PWD/.multilint.json first, and several tests below
+    already pass cwd=sample_project explicitly for other reasons — this
+    fixture only protects the ones that do not.
+    """
+    with tempfile.TemporaryDirectory() as empty_dir:
+        monkeypatch.chdir(empty_dir)
+        yield
 
 
 class TestFileDiscovery:
