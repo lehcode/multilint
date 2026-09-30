@@ -4,19 +4,38 @@
 #
 # Policies:
 #   - Configurable thresholds per check (zero tolerance = default)
-#   - Config file: .multilint.json in target directory (per-check thresholds)
+#   - Config file: .multilint.json, resolved $PWD-first (see ml_find_config)
 #   - 4-space indentation required for shell scripts
 #   - Bashate E006 (line length) is excluded
 #
-# Config format (.multilint.json):
+# Config format (.multilint.json), parsed once per run:
 #   {
 #     "bash_syntax": 0, "shellcheck": 0, "bashate": 0, "shfmt": 0,
 #     "flake8": 0, "black": 0, "pylint": 0, "mypy": 0, "bandit": 0,
 #     "markdownlint": 0,
 #     "yaml_prettier": 0, "json_prettier": 0, "toml_sort": 0,
-#     "security_secrets": 0, "security_dangerous_patterns": 0
+#     "security_secrets": 0, "security_dangerous_patterns": 0,
+#     "checks": {
+#       "flake8": { "enabled": true, "threshold": 2, "args": ["--max-line-length=100"] }
+#     },
+#     "gitleaks": { "depth": "all", "config": ".gitleaks.toml" },
+#     "bandit": { "severity": "-lll" },
+#     "mypy": { "cache_dir": "/tmp/.mypy_cache" }
 #   }
-#   Any key omitted defaults to 0.
+#   Any key omitted defaults to 0/on. The flat top-level form above remains a
+#   valid threshold for every check; "checks.<name>.threshold" wins over it
+#   when both are present (a warning names the redundant flat key). Precedence
+#   for every setting is: .multilint.json value > built-in default. There is
+#   no environment-variable layer (user decision, 2026-09-30: environment
+#   variables are not a multilint configuration surface). A malformed file,
+#   an unknown key, or a wrongly typed value produces a warning (stderr in
+#   text mode, JSON "warnings" field) and that single setting falls back
+#   rather than silently reading as 0.
+#
+# Thresholds gate the run verdict: the process exit code and JSON
+# "return_code" are 1 if and only if at least one enabled check has failures
+# strictly greater than its effective threshold; a check within its threshold
+# no longer fails the run by itself.
 #
 # JSON output (--format json), per entry under "checks":
 #   failures            files that failed this check (gitleaks: findings)
@@ -30,20 +49,6 @@
 #   off, so a consumer can tell "nothing was wrong" from "nothing was checked".
 #   summary.checks_skipped lists those names, and summary.checks_run is derived
 #   from the check list rather than hardcoded.
-#
-# Feature toggles:
-#   MULTILINT_BLACK_CHECK: set to "off" to skip black formatting check
-#   MULTILINT_SHFMT_CHECK: set to "off" to skip shfmt formatting check
-#   MULTILINT_BASHATE_CHECK: set to "off" to skip bashate indentation check
-#   MULTILINT_MYPY_CHECK: set to "off" to skip mypy static type check
-#   MULTILINT_BANDIT_CHECK: set to "off" to skip bandit security check
-#   MULTILINT_MYPY_CACHE_DIR: mypy cache location (default: /tmp/.mypy_cache)
-#   MULTILINT_BANDIT_SEVERITY: bandit severity flag (default: -ll, medium and high)
-#   MULTILINT_SECURITY_CHECK: set to "off" to skip security scanning
-#   MULTILINT_GITLEAKS_CHECK: set to "off" to skip gitleaks scanning
-#   MULTILINT_TOML_CHECK: set to "off" to skip TOML linting
-#   MULTILINT_YAML_JSON_CHECK: set to "off" to skip YAML/JSON linting
-#   MULTILINT_GITLEAKS_DEPTH: set to "1" for last commit, "all" for full history (default: 1)
 
 # Configurable thresholds per check (zero tolerance = default)
 #
@@ -51,6 +56,14 @@
 #   bash lint.sh [dir]          # defaults to current directory
 #   bash lint.sh [dir] --format json  # JSON output
 #   bash lint.sh [dir] --format text  # terminal output (default)
+
+# File-wide: every "<check>_threshold" and "<check>_enabled" variable is
+# assigned dynamically via `printf -v` (built-in defaults) and `eval` (the
+# .multilint.json loader's filtered output), so shellcheck cannot trace the
+# assignment back to the read site. A per-line disable at every one of the
+# sixteen checks' guard sites would be noise; the dynamic-assignment pattern
+# itself is what SC2154 exists to flag, and it is intentional here.
+# shellcheck disable=SC2154
 
 set -euo pipefail
 
@@ -82,100 +95,18 @@ if [ "$OUTPUT_FORMAT" = "json" ]; then
     exec 1>&2
 fi
 
-# ---------------------------------------------------------------------------
-# Load thresholds from .multilint.json
-# ---------------------------------------------------------------------------
-get_threshold() {
-    local config="$TARGET_DIR/.multilint.json"
-    if [ -f "$config" ]; then
-        set +e
-        python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    print(d.get(sys.argv[2], 0))
-except Exception:
-    print(0)
-" "$config" "$1"
-        set -e
-    else
-        echo 0
-    fi
-}
-
-# shellcheck disable=SC2034
-bash_syntax_threshold=$(get_threshold bash_syntax)
-# shellcheck disable=SC2034
-shellcheck_threshold=$(get_threshold shellcheck)
-# shellcheck disable=SC2034
-bashate_threshold=$(get_threshold bashate)
-# shellcheck disable=SC2034
-shfmt_threshold=$(get_threshold shfmt)
-# shellcheck disable=SC2034
-flake8_threshold=$(get_threshold flake8)
-# shellcheck disable=SC2034
-black_threshold=$(get_threshold black)
-# shellcheck disable=SC2034
-pylint_threshold=$(get_threshold pylint)
-# shellcheck disable=SC2034
-mypy_threshold=$(get_threshold mypy)
-# shellcheck disable=SC2034
-bandit_threshold=$(get_threshold bandit)
-# shellcheck disable=SC2034
-markdownlint_threshold=$(get_threshold markdownlint)
-
-# New check thresholds
-# shellcheck disable=SC2034
-yaml_prettier_threshold=$(get_threshold yaml_prettier)
-# shellcheck disable=SC2034
-json_prettier_threshold=$(get_threshold json_prettier)
-# shellcheck disable=SC2034
-toml_sort_threshold=$(get_threshold toml_sort)
-# shellcheck disable=SC2034
-security_secrets_threshold=$(get_threshold security_secrets)
-# shellcheck disable=SC2034
-security_dangerous_patterns_threshold=$(get_threshold security_dangerous_patterns)
-
-# Gitleaks threshold
-# shellcheck disable=SC2034
-gitleaks_threshold=$(get_threshold gitleaks)
-
-# Feature toggles (default: enabled)
-# MULTILINT_BLACK_CHECK: set to "off" to skip black formatting check
-# MULTILINT_SHFMT_CHECK: set to "off" to skip shfmt formatting check
-# MULTILINT_BASHATE_CHECK: set to "off" to skip bashate indentation check
-# MULTILINT_MYPY_CHECK: set to "off" to skip mypy static type check
-# MULTILINT_BANDIT_CHECK: set to "off" to skip bandit security check
-BLACK_ENABLED="${MULTILINT_BLACK_CHECK:-on}"
-SHFMT_ENABLED="${MULTILINT_SHFMT_CHECK:-on}"
-BASHATE_ENABLED="${MULTILINT_BASHATE_CHECK:-on}"
-MYPY_ENABLED="${MULTILINT_MYPY_CHECK:-on}"
-BANDIT_ENABLED="${MULTILINT_BANDIT_CHECK:-on}"
-
-# mypy writes an incremental cache beside the sources it checks. The workspace is
-# mounted read-only, where that makes mypy abort with "INTERNAL ERROR", so the
-# cache is redirected to a writable path. Overridable for non-container use.
-MYPY_CACHE_DIR="${MULTILINT_MYPY_CACHE_DIR:-/tmp/.mypy_cache}"
-
-# bandit reports low-severity findings (assert usage, subprocess imports) that are
-# noise in this codebase; -ll limits output to medium and high severity.
-BANDIT_SEVERITY="${MULTILINT_BANDIT_SEVERITY:--ll}"
-
-# bandit's default report appends a metrics block that says nothing actionable. The
-# custom format collapses each finding to a single grep-friendly line.
-BANDIT_TEMPLATE="{relpath}:{line}: [{test_id}] {severity}: {msg}"
-# shellcheck disable=SC2034
-SECURITY_ENABLED="${MULTILINT_SECURITY_CHECK:-on}"
-# shellcheck disable=SC2034
-GITLEAKS_ENABLED="${MULTILINT_GITLEAKS_CHECK:-on}"
-# shellcheck disable=SC2034
-TOML_ENABLED="${MULTILINT_TOML_CHECK:-on}"
-# shellcheck disable=SC2034
-YAML_JSON_ENABLED="${MULTILINT_YAML_JSON_CHECK:-on}"
-
-# Gitleaks depth control: "1" = last commit, "all" = full history
-# shellcheck disable=SC2034
-GITLEAKS_DEPTH="${MULTILINT_GITLEAKS_DEPTH:-1}"
+# Canonical check list. Single source of truth for the JSON emitter and for
+# summary.checks_run, which used to be a hardcoded 11 that silently disagreed
+# with the counters above. It also fixes the order of the "checks" object, which
+# would otherwise follow environment-variable order and vary between runs.
+ALL_CHECKS=(
+    bash_syntax shellcheck bashate shfmt
+    flake8 black pylint mypy bandit
+    markdownlint
+    yaml_prettier json_prettier toml_sort
+    security_secrets security_dangerous_patterns
+    gitleaks
+)
 
 # Fail counters per check (across ALL files)
 declare -A check_failures
@@ -196,19 +127,6 @@ check_failures[security_secrets]=0
 check_failures[security_dangerous_patterns]=0
 check_failures[gitleaks]=0
 
-# Canonical check list. Single source of truth for the JSON emitter and for
-# summary.checks_run, which used to be a hardcoded 11 that silently disagreed
-# with the counters above. It also fixes the order of the "checks" object, which
-# would otherwise follow environment-variable order and vary between runs.
-ALL_CHECKS=(
-    bash_syntax shellcheck bashate shfmt
-    flake8 black pylint mypy bandit
-    markdownlint
-    yaml_prettier json_prettier toml_sort
-    security_secrets security_dangerous_patterns
-    gitleaks
-)
-
 # Per-check units actually submitted to the tool, so "passed" has a denominator.
 # Without it, failures=0 is indistinguishable from "the check never ran" — the
 # false-green this pair of arrays exists to close.
@@ -223,9 +141,349 @@ for _ml_check in "${ALL_CHECKS[@]}"; do
 done
 unset _ml_check
 
+# ---------------------------------------------------------------------------
+# Configuration: built-in defaults -> .multilint.json
+#
+# Two ordered layers, each owning exactly one precedence level. No
+# environment variable participates in this resolution (user decision,
+# 2026-09-30: environment variables are not a multilint configuration
+# surface):
+#   1. Built-in defaults (today's behavior: zero tolerance, every check on).
+#   2. .multilint.json, read once by a single python3 parse (see
+#      ml_find_config below for lookup order) whose output is filtered
+#      against a fixed vocabulary before eval, so nothing beyond the
+#      variables this script itself defines can ever be assigned.
+#   Warnings collected along the way are printed once to stderr and exposed
+#   to the JSON emitter as a top-level "warnings" list.
+# ---------------------------------------------------------------------------
+
+# ml_find_config: $PWD/.multilint.json first (both plugins set --workdir to
+# the scope root, so this is where the file lives on the hook path); fall
+# back to $TARGET_DIR/.multilint.json only when TARGET_DIR is a directory,
+# preserving direct `bash lint.sh <dir>` usage. TARGET_DIR is a single FILE
+# on the plugin path, so it is never treated as a directory to look under --
+# that mismatch was defect 1: every threshold silently read as 0.
+ml_find_config() {
+    if [ -f "$PWD/.multilint.json" ]; then
+        echo "$PWD/.multilint.json"
+    elif [ -d "$TARGET_DIR" ] && [ -f "$TARGET_DIR/.multilint.json" ]; then
+        echo "$TARGET_DIR/.multilint.json"
+    fi
+}
+ml_config_file="$(ml_find_config)"
+ml_warnings=()
+
+# 1. Built-in defaults.
+for _ml_check in "${ALL_CHECKS[@]}"; do
+    printf -v "${_ml_check}_threshold" '%s' 0
+    printf -v "${_ml_check}_enabled" '%s' on
+done
+unset _ml_check
+ML_CFG_GITLEAKS_DEPTH=1
+ML_CFG_GITLEAKS_CONFIG=""
+ML_CFG_BANDIT_SEVERITY="-ll"
+ML_CFG_MYPY_CACHE_DIR="/tmp/.mypy_cache"
+
+# 2. JSON layer. ml_line_allowed is the line filter: every line the loader
+# prints must match one of these patterns or the whole output is discarded.
+# Names never derive from input (they come from ALL_CHECKS and the fixed
+# ML_CFG_*/ml_warnings names below), and every value the loader prints is
+# already shlex.quote()d, so the filter is defence in depth on top of the
+# loader's own contract, not the only thing standing between a hostile file
+# and eval.
+ml_check_alt="$(
+    IFS='|'
+    echo "${ALL_CHECKS[*]}"
+)"
+ml_line_allowed() {
+    local line="$1"
+    if [[ "$line" =~ ^($ml_check_alt)_(threshold|enabled)=.*$ ]]; then
+        return 0
+    fi
+    if [[ "$line" =~ ^($ml_check_alt)_args=\(.*\)$ ]]; then
+        return 0
+    fi
+    if [[ "$line" == ML_CFG_GITLEAKS_DEPTH=* || "$line" == ML_CFG_GITLEAKS_CONFIG=* \
+        || "$line" == ML_CFG_BANDIT_SEVERITY=* || "$line" == ML_CFG_MYPY_CACHE_DIR=* ]]; then
+        return 0
+    fi
+    if [[ "$line" == "ml_warnings+=("*")" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+if [ -n "$ml_config_file" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        if ml_config_out="$(python3 - "$ml_config_file" <<'ML_CONFIG_PY'
+import json
+import shlex
+import sys
+
+ALL_CHECKS = (
+    "bash_syntax",
+    "shellcheck",
+    "bashate",
+    "shfmt",
+    "flake8",
+    "black",
+    "pylint",
+    "mypy",
+    "bandit",
+    "markdownlint",
+    "yaml_prettier",
+    "json_prettier",
+    "toml_sort",
+    "security_secrets",
+    "security_dangerous_patterns",
+    "gitleaks",
+)
+NO_ARGS_CHECKS = {"bash_syntax", "security_secrets", "security_dangerous_patterns"}
+CHECK_SETTING_KEYS = {"enabled", "threshold", "args"}
+OPTION_GROUPS = {
+    "gitleaks": {"depth", "config"},
+    "bandit": {"severity"},
+    "mypy": {"cache_dir"},
+}
+OPTION_VARS = {
+    ("gitleaks", "depth"): "ML_CFG_GITLEAKS_DEPTH",
+    ("gitleaks", "config"): "ML_CFG_GITLEAKS_CONFIG",
+    ("bandit", "severity"): "ML_CFG_BANDIT_SEVERITY",
+    ("mypy", "cache_dir"): "ML_CFG_MYPY_CACHE_DIR",
+}
+
+warnings = []
+assignments = []
+
+
+def jd(value):
+    """Render an untrusted string safely: quoted, control characters escaped."""
+    return json.dumps(value)
+
+
+def q(value):
+    """Shell-quote a value for eval-safe assignment."""
+    return shlex.quote(str(value))
+
+
+def has_control_char(value):
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
+def is_nonneg_int(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def clean_string(value):
+    return isinstance(value, str) and value != "" and not has_control_char(value)
+
+
+def finish():
+    for line in assignments:
+        print(line)
+    for message in warnings:
+        print("ml_warnings+=( %s )" % q(message))
+    sys.exit(0)
+
+
+config_path = sys.argv[1]
+
+try:
+    with open(config_path, "rb") as handle:
+        raw = handle.read()
+except OSError as exc:
+    warnings.append("cannot read config file: %s" % exc)
+    finish()
+
+if len(raw) > 1024 * 1024:
+    warnings.append("config file larger than 1 MiB, ignored")
+    finish()
+
+try:
+    text = raw.decode("utf-8")
+except UnicodeDecodeError as exc:
+    warnings.append("config is not valid utf-8: %s" % exc)
+    finish()
+
+try:
+    document = json.loads(text)
+except json.JSONDecodeError as exc:
+    warnings.append("invalid JSON at line %d column %d: %s" % (exc.lineno, exc.colno, exc.msg))
+    finish()
+
+if not isinstance(document, dict):
+    warnings.append("config top level must be an object")
+    finish()
+
+flat_thresholds = {}
+checks_thresholds = {}
+checks_enabled = {}
+checks_args = {}
+options = {}
+
+for key, value in document.items():
+    if key == "checks":
+        if not isinstance(value, dict):
+            warnings.append('"checks" must be an object')
+            continue
+        for check_name, check_value in value.items():
+            if check_name not in ALL_CHECKS:
+                warnings.append('unknown check %s under "checks" ignored' % jd(check_name))
+                continue
+            if not isinstance(check_value, dict):
+                warnings.append('"checks.%s" must be an object' % check_name)
+                continue
+            for setting_key, setting_value in check_value.items():
+                if setting_key not in CHECK_SETTING_KEYS:
+                    warnings.append(
+                        'unknown key %s under "checks.%s" ignored' % (jd(setting_key), check_name)
+                    )
+                    continue
+                if setting_key == "enabled":
+                    if not isinstance(setting_value, bool):
+                        warnings.append('"checks.%s.enabled" must be a boolean' % check_name)
+                        continue
+                    checks_enabled[check_name] = setting_value
+                elif setting_key == "threshold":
+                    if not is_nonneg_int(setting_value):
+                        warnings.append('"checks.%s.threshold" must be a non-negative integer' % check_name)
+                        continue
+                    checks_thresholds[check_name] = setting_value
+                elif setting_key == "args":
+                    if check_name in NO_ARGS_CHECKS:
+                        warnings.append('"checks.%s.args" has no effect and is ignored' % check_name)
+                        continue
+                    if not isinstance(setting_value, list) or not all(
+                        isinstance(item, str) for item in setting_value
+                    ):
+                        warnings.append('"checks.%s.args" must be a list of strings' % check_name)
+                        continue
+                    if any(has_control_char(item) for item in setting_value):
+                        warnings.append('"checks.%s.args" contains a control character, ignored' % check_name)
+                        continue
+                    checks_args[check_name] = setting_value
+    elif key in OPTION_GROUPS:
+        if isinstance(value, int) and not isinstance(value, bool):
+            if value < 0:
+                warnings.append('"%s" threshold must be a non-negative integer' % key)
+            else:
+                flat_thresholds[key] = value
+        elif isinstance(value, dict):
+            for option_key, option_value in value.items():
+                if option_key not in OPTION_GROUPS[key]:
+                    warnings.append('unknown option %s under "%s" ignored' % (jd(option_key), key))
+                    continue
+                if key == "gitleaks" and option_key == "depth":
+                    if option_value == "all":
+                        options[(key, option_key)] = "all"
+                    elif option_value in ("1", 1):
+                        options[(key, option_key)] = "1"
+                    else:
+                        warnings.append('"gitleaks.depth" must be "all" or "1"')
+                    continue
+                if key == "bandit" and option_key == "severity":
+                    if option_value in ("-l", "-ll", "-lll"):
+                        options[(key, option_key)] = option_value
+                    else:
+                        warnings.append('"bandit.severity" must be one of "-l", "-ll", "-lll"')
+                    continue
+                if not clean_string(option_value):
+                    warnings.append('"%s.%s" must be a non-empty string' % (key, option_key))
+                    continue
+                options[(key, option_key)] = option_value
+        else:
+            warnings.append('"%s" must be an object or a non-negative integer' % key)
+    elif key in ALL_CHECKS:
+        if not is_nonneg_int(value):
+            warnings.append('"%s" threshold must be a non-negative integer' % key)
+        else:
+            flat_thresholds[key] = value
+    else:
+        warnings.append('unknown top-level key %s ignored' % jd(key))
+
+for name in ALL_CHECKS:
+    has_flat = name in flat_thresholds
+    has_checks = name in checks_thresholds
+    if has_flat and has_checks:
+        assignments.append("%s_threshold=%s" % (name, q(checks_thresholds[name])))
+        warnings.append(
+            '"%s" has both a flat threshold and "checks.%s.threshold"; using checks.%s.threshold'
+            % (name, name, name)
+        )
+    elif has_checks:
+        assignments.append("%s_threshold=%s" % (name, q(checks_thresholds[name])))
+    elif has_flat:
+        assignments.append("%s_threshold=%s" % (name, q(flat_thresholds[name])))
+
+for name, enabled_value in checks_enabled.items():
+    assignments.append("%s_enabled=%s" % (name, q("on" if enabled_value else "off")))
+
+for name, arg_list in checks_args.items():
+    quoted_items = " ".join(q(item) for item in arg_list)
+    assignments.append("%s_args=( %s )" % (name, quoted_items))
+
+for (group_key, option_key), option_value in options.items():
+    assignments.append("%s=%s" % (OPTION_VARS[(group_key, option_key)], q(option_value)))
+
+finish()
+ML_CONFIG_PY
+        )"; then
+            ml_config_ok=true
+            while IFS= read -r ml_line; do
+                [ -z "$ml_line" ] && continue
+                if ! ml_line_allowed "$ml_line"; then
+                    ml_config_ok=false
+                    break
+                fi
+            done <<<"$ml_config_out"
+            if [ "$ml_config_ok" = true ]; then
+                if [ -n "$ml_config_out" ]; then
+                    eval "$ml_config_out"
+                fi
+            else
+                ml_warnings+=("configuration loader produced unexpected output; ignoring the file")
+            fi
+        else
+            ml_warnings+=("configuration loader failed to run; using defaults")
+        fi
+    else
+        ml_warnings+=("configuration file found but python3 is not available; using defaults")
+    fi
+fi
+
+# mypy writes an incremental cache beside the sources it checks. The workspace is
+# mounted read-only, where that makes mypy abort with "INTERNAL ERROR", so the
+# cache is redirected to a writable path. Resolved from .multilint.json's
+# mypy.cache_dir, falling back to the same built-in default the JSON layer
+# already applies when nothing is configured.
+MYPY_CACHE_DIR="${ML_CFG_MYPY_CACHE_DIR:-/tmp/.mypy_cache}"
+
+# bandit reports low-severity findings (assert usage, subprocess imports) that are
+# noise in this codebase; -ll limits output to medium and high severity. Resolved
+# from .multilint.json's bandit.severity, falling back to the built-in default.
+BANDIT_SEVERITY="${ML_CFG_BANDIT_SEVERITY:--ll}"
+
+# bandit's default report appends a metrics block that says nothing actionable. The
+# custom format collapses each finding to a single grep-friendly line.
+BANDIT_TEMPLATE="{relpath}:{line}: [{test_id}] {severity}: {msg}"
+
+# Gitleaks depth control: "1" = last commit, "all" = full history. Resolved
+# from .multilint.json's gitleaks.depth, falling back to the built-in default.
+GITLEAKS_DEPTH="${ML_CFG_GITLEAKS_DEPTH:-1}"
+
+# Gitleaks config path override: .multilint.json's gitleaks.config, falling
+# back to the image/beside-script candidates tried below.
+GITLEAKS_CONFIG_OVERRIDE="${ML_CFG_GITLEAKS_CONFIG:-}"
+
+# 3. Warnings -- printed once, regardless of output format, since this
+# explicit stderr redirect (>&2) bypasses the JSON-mode stdout swap above.
+for ml_warning in "${ml_warnings[@]+"${ml_warnings[@]}"}"; do
+    printf 'multilint: config warning: %s\n' "$ml_warning" >&2
+done
+
 info()  { echo -e "\n\033[1m→ $*\033[0m"; }
 pass()  { echo "  ✓ $*"; }
-fail()  { echo "  ✗ $*"; EXIT_CODE=1; }
+fail()  { echo "  ✗ $*"; }
 warn()  { echo "  ~ $*"; }
 
 # Record that $1 actually ran against one more unit of work.
@@ -279,7 +537,7 @@ else
         fi
 
         # Bashate — 4-space indentation check, excludes E006 (line length)
-        if [ "$BASHATE_ENABLED" = "off" ]; then
+        if [ "$bashate_enabled" = "off" ]; then
             skipped bashate
             warn "bashate (disabled)"
         elif command -v bashate >/dev/null 2>&1; then
@@ -314,7 +572,7 @@ else
         #
         # Passing a printer flag also makes shfmt ignore any .editorconfig it finds, which keeps this
         # verdict identical inside the container and on a contributor's machine.
-        if [ "$SHFMT_ENABLED" = "off" ]; then
+        if [ "$shfmt_enabled" = "off" ]; then
             skipped shfmt
             warn "shfmt (disabled)"
         elif command -v shfmt >/dev/null 2>&1; then
@@ -384,7 +642,7 @@ else
         fi
 
         # black (formatting)
-        if [ "$BLACK_ENABLED" = "off" ]; then
+        if [ "$black_enabled" = "off" ]; then
             skipped black
             warn "black (disabled)"
         elif command -v black >/dev/null 2>&1; then
@@ -430,7 +688,7 @@ else
         # cosmetic: the image installs no project dependencies, so without them
         # every third-party import reports import-not-found and drowns out real
         # findings. This mirrors pylint running with E0401 disabled.
-        if [ "$MYPY_ENABLED" = "off" ]; then
+        if [ "$mypy_enabled" = "off" ]; then
             skipped mypy
             warn "mypy (disabled)"
         elif command -v mypy >/dev/null 2>&1; then
@@ -453,7 +711,7 @@ else
         fi
 
         # bandit (security)
-        if [ "$BANDIT_ENABLED" = "off" ]; then
+        if [ "$bandit_enabled" = "off" ]; then
             skipped bandit
             warn "bandit (disabled)"
         elif command -v bandit >/dev/null 2>&1; then
@@ -568,18 +826,23 @@ mapfile -t json_files < <(find "$TARGET_DIR" -type f -name '*.json' ! -path '*/\
 
 if [ ${#yaml_files[@]} -eq 0 ] && [ ${#json_files[@]} -eq 0 ]; then
     echo "  (none found)"
-else
-    if [ "$YAML_JSON_ENABLED" = "off" ]; then
-        skipped yaml_prettier
-        skipped json_prettier
-        warn "YAML/JSON checks (disabled)"
-    elif command -v prettier >/dev/null 2>&1; then
-        for f in "${yaml_files[@]}" "${json_files[@]}"; do
-            FILES_CHECKED+=("$f")
-            echo ""
-            echo "  📋 $f"
+elif [ "$yaml_prettier_enabled" = "off" ] && [ "$json_prettier_enabled" = "off" ]; then
+    skipped yaml_prettier
+    skipped json_prettier
+    warn "YAML/JSON checks (disabled)"
+elif command -v prettier >/dev/null 2>&1; then
+    for f in "${yaml_files[@]}" "${json_files[@]}"; do
+        FILES_CHECKED+=("$f")
+        echo ""
+        echo "  📋 $f"
 
-            if [[ "$f" == *.yaml || "$f" == *.yml ]]; then
+        # yaml_prettier and json_prettier resolve independently -- each has
+        # its own "checks.<name>.enabled" in .multilint.json.
+        if [[ "$f" == *.yaml || "$f" == *.yml ]]; then
+            if [ "$yaml_prettier_enabled" = "off" ]; then
+                skipped yaml_prettier
+                warn "yaml prettier (disabled)"
+            else
                 ran yaml_prettier
                 set +e
                 prettier_output="$(prettier --check --log-level error "$f" 2>&1)"
@@ -592,7 +855,12 @@ else
                     check_failures[yaml_prettier]=$(( check_failures[yaml_prettier] + 1 ))
                     fail "yaml prettier"
                 fi
-            elif [[ "$f" == *.json ]]; then
+            fi
+        elif [[ "$f" == *.json ]]; then
+            if [ "$json_prettier_enabled" = "off" ]; then
+                skipped json_prettier
+                warn "json prettier (disabled)"
+            else
                 ran json_prettier
                 set +e
                 prettier_output="$(prettier --check --log-level error "$f" 2>&1)"
@@ -606,12 +874,12 @@ else
                     fail "json prettier"
                 fi
             fi
-        done
-    else
-        skipped yaml_prettier
-        skipped json_prettier
-        warn "prettier (not installed, skipping YAML/JSON checks)"
-    fi
+        fi
+    done
+else
+    skipped yaml_prettier
+    skipped json_prettier
+    warn "prettier (not installed, skipping YAML/JSON checks)"
 fi
 
 echo ""
@@ -641,7 +909,7 @@ mapfile -t toml_files < <(find "$TARGET_DIR" -type f -name '*.toml' ! -path '*/\
 if [ ${#toml_files[@]} -eq 0 ]; then
     echo "  (none found)"
 else
-    if [ "$TOML_ENABLED" = "off" ]; then
+    if [ "$toml_sort_enabled" = "off" ]; then
         skipped toml_sort
         warn "TOML checks (disabled)"
     elif command -v toml-sort >/dev/null 2>&1; then
@@ -692,10 +960,11 @@ done
 # ---------------------------------------------------------------------------
 info "Running security scans..."
 
-if [ "$SECURITY_ENABLED" = "off" ]; then
+# security_secrets and security_dangerous_patterns resolve independently --
+# each has its own "checks.<name>.enabled" in .multilint.json.
+if [ "$security_secrets_enabled" = "off" ]; then
     skipped security_secrets
-    skipped security_dangerous_patterns
-    warn "Security checks (disabled)"
+    warn "security_secrets (disabled)"
 else
     # --- Hardcoded secrets in shell scripts ---
     info "Checking for hardcoded secrets in shell scripts..."
@@ -742,7 +1011,12 @@ else
             fail "security (hardcoded secrets)"
         fi
     done
+fi
 
+if [ "$security_dangerous_patterns_enabled" = "off" ]; then
+    skipped security_dangerous_patterns
+    warn "security_dangerous_patterns (disabled)"
+else
     # --- Dangerous shell patterns ---
     info "Checking for dangerous shell patterns..."
     # shellcheck disable=SC2043
@@ -786,7 +1060,7 @@ done
 # ---------------------------------------------------------------------------
 info "Running gitleaks..."
 
-if [ "$GITLEAKS_ENABLED" = "off" ]; then
+if [ "$gitleaks_enabled" = "off" ]; then
     skipped gitleaks
     warn "gitleaks (disabled)"
 elif command -v gitleaks >/dev/null 2>&1; then
@@ -821,7 +1095,7 @@ elif command -v gitleaks >/dev/null 2>&1; then
     # gitleaks falls back to its built-in rules rather than refusing to start.
     gitleaks_config=""
     for candidate in \
-        "${MULTILINT_GITLEAKS_CONFIG:-}" \
+        "$GITLEAKS_CONFIG_OVERRIDE" \
         /usr/local/bin/.gitleaks.toml \
         "$(dirname "${BASH_SOURCE[0]}")/.gitleaks.toml"; do
         if [ -n "$candidate" ] && [ -f "$candidate" ]; then
@@ -885,16 +1159,42 @@ fi
 
 echo ""
 # Threshold summary for gitleaks
-failures=${check_failures[gitleaks]}
-if [ "$failures" -gt 0 ]; then
-    if [ "$failures" -gt "$gitleaks_threshold" ]; then
-        echo "  ⚠ gitleaks: $failures findings (threshold: $gitleaks_threshold)"
+# shellcheck disable=SC2043
+for check in gitleaks; do
+    failures=${check_failures[$check]}
+    threshold_var="${check}_threshold"
+    threshold=${!threshold_var}
+    if [ "$failures" -gt 0 ]; then
+        if [ "$failures" -gt "$threshold" ]; then
+            echo "  ⚠ $check: $failures findings (threshold: $threshold)"
+        else
+            echo "  ✓ $check: $failures findings (threshold: $threshold)"
+        fi
     else
-        echo "  ✓ gitleaks: $failures findings (threshold: $gitleaks_threshold)"
+        echo "  ✓ $check: 0 findings (threshold: $threshold)"
     fi
-else
-    echo "  ✓ gitleaks: 0 findings (threshold: $gitleaks_threshold)"
-fi
+done
+
+# ---------------------------------------------------------------------------
+# Threshold-gated verdict — computed once, unconditionally, from every
+# check's failures vs. its effective threshold. This is the single source
+# both the JSON emitter and the text-mode summary line read from; fail()
+# above no longer accumulates EXIT_CODE as a side effect of printing an
+# individual finding, so there is nothing left to disagree with this.
+# ---------------------------------------------------------------------------
+declare -A check_threshold_exceeded
+EXIT_CODE=0
+for check in "${ALL_CHECKS[@]}"; do
+    failures=${check_failures[$check]}
+    threshold_var="${check}_threshold"
+    threshold=${!threshold_var}
+    if [ "$failures" -gt "$threshold" ]; then
+        check_threshold_exceeded[$check]="true"
+        EXIT_CODE=1
+    else
+        check_threshold_exceeded[$check]="false"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # Summary and JSON output
@@ -920,8 +1220,7 @@ if [ "$OUTPUT_FORMAT" = "json" ]; then
         status=${check_status[$check]}
         threshold_var="${check}_threshold"
         threshold=${!threshold_var}
-        threshold_exceeded="false"
-        [ "$failures" -gt "$threshold" ] && threshold_exceeded="true"
+        threshold_exceeded="${check_threshold_exceeded[$check]}"
         # A check with failures reports "failed" regardless of threshold: the
         # threshold governs whether the run fails, not whether the check found
         # anything. "skipped" wins, since a check that never ran cannot fail.
@@ -948,6 +1247,11 @@ if [ "$OUTPUT_FORMAT" = "json" ]; then
     export ML_CHECKS_COUNT=${#ALL_CHECKS[@]}
     export ML_TOTAL_FILES=${#FILES_CHECKED[@]}
     export ML_EXIT_CODE=$EXIT_CODE
+    # Newline-joined configuration warnings, safe to split on "\n": the
+    # loader rejects any string containing a control character, so no
+    # warning message can contain an embedded newline of its own.
+    ML_WARNINGS="$(printf '%s\n' "${ml_warnings[@]+"${ml_warnings[@]}"}")"
+    export ML_WARNINGS
     # shellcheck disable=SC2155
     _ml_json="$(
         python3 <<'ML_PYTHON'
@@ -983,6 +1287,7 @@ for name in os.environ.get("ML_CHECK_ORDER", "").split(","):
         }
 files = [f.strip() for f in os.environ.get("ML_FILES", "").split(",") if f.strip()]
 skipped = sorted(n for n, c in checks.items() if c["status"] == "skipped")
+warnings = [w for w in os.environ.get("ML_WARNINGS", "").split("\n") if w]
 result = {
     "summary": {
         "files_checked": len(files),
@@ -994,6 +1299,10 @@ result = {
     "checks": checks,
     "return_code": int(os.environ.get("ML_EXIT_CODE", "0")),
     "files": files,
+    # Configuration problems (malformed JSON, unknown keys, wrongly typed
+    # values, …) — additive; every existing field keeps its name, type and
+    # position. Always present, [] when there is nothing to report.
+    "warnings": warnings,
 }
 print(json.dumps(result, indent=2))
 ML_PYTHON
