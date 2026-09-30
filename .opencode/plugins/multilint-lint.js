@@ -55,10 +55,11 @@ const LINTABLE_EXTENSIONS = new Set([
   ".toml", // TOML
 ]);
 
-// gitleaks scans git history and lint.sh only runs it when "<target>/.git" exists. The target here
-// is a single file, so that test can never pass. Its skip is structural rather than informative, so
-// it is filtered out instead of being reported after every write.
-const STRUCTURALLY_SKIPPED = new Set(["gitleaks"]);
+// Nothing is filtered any more. gitleaks used to be listed here because lint.sh gated it on
+// "<target>/.git" and a single-file target can never satisfy that, so it was reported skipped after
+// every write. lint.sh now picks --no-git when there is no repository, so the check produces a real
+// verdict either way and a reported skip means something again.
+const STRUCTURALLY_SKIPPED = new Set();
 
 /** Nearest ancestor containing .git, or null. Mirrors the scope-root rule in lint_changed.py. */
 async function findGitRoot(startDir) {
