@@ -181,7 +181,11 @@ docker compose build
 docker compose up -d
 ```
 
-By default the compose file mounts the host's workspace as read-only at `/workspace` inside the container. This is what AI agents and CI pipelines lint.
+The compose file mounts `MULTILINT_WORKSPACE` read-only at `/workspace` inside the container, defaulting to the directory you run compose from. This is what AI agents and CI pipelines lint. Set it explicitly to lint somewhere else:
+
+```bash
+MULTILINT_WORKSPACE=/path/to/project docker compose up -d
+```
 
 ## Developer Guide
 
