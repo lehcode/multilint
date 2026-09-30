@@ -153,21 +153,29 @@ class TestFeatureToggles:
         assert "shfmt (disabled)" in result.stdout or "shfmt" not in result.stdout
 
     def test_shfmt_indent_agrees_with_bashate(self):
-        """shfmt must be given -i 4, or it contradicts bashate and nothing can pass both.
+        """shfmt's default policy flags must still include -i 4, or it contradicts bashate and
+        nothing can pass both.
 
-        shfmt's default indent is 0, meaning TAB indents, while bashate emits E002 "Tab indents"
-        and E003 "Indent not multiple of 4". With the default, every shell file in this repository
-        failed exactly one of the two checks and no file could satisfy both. That cost real work:
-        claude-plugin/scripts/lint-changed.sh was written with no indented lines at all purely to
-        pass both.
+        shfmt's own default indent is 0, meaning TAB indents, while bashate emits E002 "Tab
+        indents" and E003 "Indent not multiple of 4". With the default, every shell file in this
+        repository failed exactly one of the two checks and no file could satisfy both. That cost
+        real work: claude-plugin/scripts/lint-changed.sh was written with no indented lines at all
+        purely to pass both.
+
+        Retargeted for slice 3 (S3.7): -i 4 now lives in the shfmt_args default array, REPLACEABLE
+        by checks.shfmt.args, rather than being hardcoded into the invocation directly. This test
+        asserts against that default array and the harness -d invocation instead of the old
+        hardcoded "shfmt -i 4 -d" literal, which no longer appears verbatim in the source.
 
         Asserted on the source text rather than by running the tools, because shfmt is not
         installed on the CI runner — a behavioural test would silently skip there, which is
         precisely where this regression would land unnoticed.
         """
         source = LINT_SH.read_text(encoding="utf-8")
-        assert "shfmt -i 4 -d" in source, "shfmt lost its -i 4 and now contradicts bashate"
-        assert "shfmt -d" not in source, "a bare `shfmt -d` reintroduces the tab/space contradiction"
+        assert "shfmt_args=(-i 4)" in source, "shfmt's default policy flags lost -i 4 and now contradict bashate"
+        assert (
+            'shfmt "${shfmt_args[@]+"${shfmt_args[@]}"}" -d "$f"' in source
+        ), "shfmt lost its -d harness-flag invocation"
 
     def test_bashate_disabled(self, tmp_dir):
         """checks.bashate.enabled: false skips bashate check."""
@@ -745,3 +753,62 @@ class TestSliceOneEssentials:
         overridden = _lint_json(proj, env=disruptive_env)
 
         assert overridden["checks"] == baseline["checks"], "a retired MULTILINT_* variable still has an effect"
+
+
+class TestSliceThreeEssentials:
+    """Reduced-scope Slice 3 regression coverage.
+
+    Per the user's essential-tests-only test policy (2026-09-30): one test for a check that
+    previously had no enablement control at all, one test that checks.<name>.args replaces built-in
+    policy flags while a harness flag survives args: [], and the retargeted shfmt/bashate agreement
+    test above (test_shfmt_indent_agrees_with_bashate). The full parametrised every-check-disableable
+    matrix (S3.2), the per-tool argv-shim suite (S3.3), and the README-table cross-check (S3.8) are
+    intentionally not implemented here -- see tasks.md, where each dropped task is marked
+    accordingly.
+    """
+
+    def test_flake8_can_now_be_disabled(self, tmp_dir):
+        """flake8 had no enablement control before this slice; checks.flake8.enabled: false must
+        now skip it, exactly like the checks that already had a toggle before slice 3.
+        """
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        _write_config(proj, {"checks": {"flake8": {"enabled": False}}})
+        (proj / "a.py").write_text("import os\n", encoding="utf-8")  # unused import -> flake8 F401
+
+        data = _lint_json(proj)
+        assert data["checks"]["flake8"]["status"] == "skipped"
+        assert data["checks"]["flake8"]["total"] == 0
+
+        result = _lint_text(proj)
+        assert "flake8 (disabled)" in result.stdout
+
+    def test_args_replaces_policy_flags_harness_flags_kept(self, tmp_dir):
+        """checks.<name>.args REPLACES that check's built-in policy flags; harness flags are
+        always kept, even when args is an empty list.
+        """
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        # A single line over flake8's default 120-column limit (E501); nothing else about this
+        # file trips flake8, so the only difference between the two runs below is the policy flag.
+        long_line = "x = 1  # " + ("a" * 145) + "\n"
+        (proj / "a.py").write_text(long_line, encoding="utf-8")
+
+        baseline = _lint_json(proj)
+        assert baseline["checks"]["flake8"]["failed"] >= 1, "the default --max-line-length=120 must flag this line"
+
+        _write_config(proj, {"checks": {"flake8": {"args": ["--max-line-length=200"]}}})
+        overridden = _lint_json(proj)
+        assert overridden["checks"]["flake8"]["failed"] == 0, "args must REPLACE the default policy flags"
+
+        # Harness flag survives args: [] -- black's --check is not a policy flag, so a run with
+        # args: [] must still never rewrite the target file, even though its policy flag
+        # (--line-length=120) is dropped.
+        _write_config(proj, {"checks": {"black": {"args": []}}})
+        unformatted = "x=1\n"
+        (proj / "b.py").write_text(unformatted, encoding="utf-8")
+        data = _lint_json(proj)
+        assert data["checks"]["black"]["failed"] >= 1, "black must still report the formatting difference"
+        assert (
+            Path(proj / "b.py").read_text(encoding="utf-8") == unformatted
+        ), "the --check harness flag must survive args: [] -- black must never rewrite the file"

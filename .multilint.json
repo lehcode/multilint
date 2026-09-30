@@ -3,8 +3,11 @@
   "shellcheck": 0,
   "bashate": 0,
   "shfmt": 0,
-  "flake8": 0,
-  "black": 0,
-  "pylint": 0,
-  "markdownlint": 0
+  "checks": {
+    "flake8": { "threshold": 0 },
+    "black": { "threshold": 0 },
+    "pylint": { "threshold": 0 },
+    "markdownlint": { "threshold": 0 }
+  },
+  "bandit": { "severity": "-ll" }
 }

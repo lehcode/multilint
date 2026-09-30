@@ -184,6 +184,35 @@ ML_CFG_GITLEAKS_CONFIG=""
 ML_CFG_BANDIT_SEVERITY="-ll"
 ML_CFG_MYPY_CACHE_DIR="/tmp/.mypy_cache"
 
+# Built-in default policy-flag arrays, one per tool-backed check. Each holds
+# today's opinionated defaults; "checks.<name>.args" in .multilint.json
+# REPLACES the array wholesale (never partially), while the harness flags
+# hardcoded at each call site are always kept regardless of args. bash_syntax,
+# security_secrets, and security_dangerous_patterns have no configurable
+# tool flags and therefore no "_args" array (see NO_ARGS_CHECKS in the loader
+# below, which rejects "args" for those three with a warning).
+shellcheck_args=(-e SC1091 -e SC2155 -e SC2086 -S style)
+bashate_args=(-i E006)
+shfmt_args=(-i 4)
+# shellcheck disable=SC2054
+flake8_args=(--max-line-length=120 --extend-ignore=E203,E111,E121,E124,BLK100)
+black_args=(--line-length=120)
+# shellcheck disable=SC2054
+pylint_args=(--disable=C,R,E0401,E1123,W1510)
+mypy_args=(--ignore-missing-imports --follow-imports=silent)
+bandit_args=()
+# markdownlint's config flag depends on $PWD, so it is computed once here,
+# before the loader runs, rather than re-checked per file as before.
+if [ -f "$PWD/.markdownlint.json" ]; then
+    markdownlint_args=(-c .markdownlint.json)
+else
+    markdownlint_args=()
+fi
+yaml_prettier_args=()
+json_prettier_args=()
+toml_sort_args=(--sort-keys)
+gitleaks_args=()
+
 # 2. JSON layer. ml_line_allowed is the line filter: every line the loader
 # prints must match one of these patterns or the whole output is discarded.
 # Names never derive from input (they come from ALL_CHECKS and the fixed
@@ -492,6 +521,14 @@ ran()  { check_totals[$1]=$(( check_totals[$1] + 1 )); }
 # per-file loops, so this fires once per file when a tool is missing.
 skipped() { check_status[$1]="skipped"; }
 
+# True unless "<check>_enabled" has been set to "off" (built-in default, then
+# .multilint.json). One helper shared by every one of the sixteen checks so
+# there is a single oracle for "is this check switched on".
+check_enabled() {
+    local v="${1}_enabled"
+    [ "${!v}" != "off" ]
+}
+
 # ---------------------------------------------------------------------------
 # Shell scripts
 # ---------------------------------------------------------------------------
@@ -507,21 +544,32 @@ else
         echo ""
         echo "  📄 $f"
 
-        # Bash syntax check — bash itself is always present, so no guard.
-        ran bash_syntax
-        if bash -n "$f" >/dev/null 2>&1; then
-            pass "bash syntax"
+        # Bash syntax check — bash itself is always present; only enablement
+        # (checks.bash_syntax.enabled) can skip it. args is unsupported here
+        # (bash -n takes no policy flags).
+        if ! check_enabled bash_syntax; then
+            skipped bash_syntax
+            warn "bash_syntax (disabled)"
         else
-            echo "    $(bash -n "$f" 2>&1)"
-            check_failures[bash_syntax]=$(( check_failures[bash_syntax] + 1 ))
-            fail "bash syntax"
+            ran bash_syntax
+            if bash -n "$f" >/dev/null 2>&1; then
+                pass "bash syntax"
+            else
+                echo "    $(bash -n "$f" 2>&1)"
+                check_failures[bash_syntax]=$(( check_failures[bash_syntax] + 1 ))
+                fail "bash syntax"
+            fi
         fi
 
-        # ShellCheck — excludes SC1091/SC2155/SC2086, disables style
-        if command -v shellcheck >/dev/null 2>&1; then
+        # ShellCheck — policy flags come from shellcheck_args (default:
+        # excludes SC1091/SC2155/SC2086, disables style).
+        if ! check_enabled shellcheck; then
+            skipped shellcheck
+            warn "shellcheck (disabled)"
+        elif command -v shellcheck >/dev/null 2>&1; then
             ran shellcheck
             set +e
-            sc_output="$(shellcheck -e SC1091 -e SC2155 -e SC2086 -S style "$f" 2>&1)"
+            sc_output="$(shellcheck "${shellcheck_args[@]+"${shellcheck_args[@]}"}" "$f" 2>&1)"
             sc_code=$?
             set -e
             if [ "$sc_code" -eq 0 ]; then
@@ -536,14 +584,15 @@ else
             warn "shellcheck (not installed, skipping)"
         fi
 
-        # Bashate — 4-space indentation check, excludes E006 (line length)
-        if [ "$bashate_enabled" = "off" ]; then
+        # Bashate — 4-space indentation check; policy flags come from
+        # bashate_args (default: excludes E006, line length).
+        if ! check_enabled bashate; then
             skipped bashate
             warn "bashate (disabled)"
         elif command -v bashate >/dev/null 2>&1; then
             ran bashate
             set +e
-            bashate_output="$(bashate -i E006 "$f" 2>&1)"
+            bashate_output="$(bashate "${bashate_args[@]+"${bashate_args[@]}"}" "$f" 2>&1)"
             bashate_rc=$?
             set -e
             if [ "$bashate_rc" -eq 0 ]; then
@@ -572,12 +621,12 @@ else
         #
         # Passing a printer flag also makes shfmt ignore any .editorconfig it finds, which keeps this
         # verdict identical inside the container and on a contributor's machine.
-        if [ "$shfmt_enabled" = "off" ]; then
+        if ! check_enabled shfmt; then
             skipped shfmt
             warn "shfmt (disabled)"
         elif command -v shfmt >/dev/null 2>&1; then
             ran shfmt
-            if shfmt -i 4 -d "$f" | grep -q .; then
+            if shfmt "${shfmt_args[@]+"${shfmt_args[@]}"}" -d "$f" | grep -q .; then
                 check_failures[shfmt]=$(( check_failures[shfmt] + 1 ))
                 fail "shfmt (formatting required)"
             else
@@ -622,11 +671,14 @@ else
         echo ""
         echo "  🐍 $f"
 
-        # flake8 (style)
-        if command -v flake8 >/dev/null 2>&1; then
+        # flake8 (style); policy flags come from flake8_args.
+        if ! check_enabled flake8; then
+            skipped flake8
+            warn "flake8 (disabled)"
+        elif command -v flake8 >/dev/null 2>&1; then
             ran flake8
             set +e
-            pb_flake8="$(flake8 --max-line-length=120 --extend-ignore=E203,E111,E121,E124,BLK100 "$f" 2>&1)"
+            pb_flake8="$(flake8 "${flake8_args[@]+"${flake8_args[@]}"}" "$f" 2>&1)"
             pb_flake8_rc=$?
             set -e
             if [ "$pb_flake8_rc" -eq 0 ]; then
@@ -641,14 +693,15 @@ else
             warn "flake8 (not installed, skipping)"
         fi
 
-        # black (formatting)
-        if [ "$black_enabled" = "off" ]; then
+        # black (formatting); harness flag --check is always kept so a run
+        # never rewrites the target file; policy flags come from black_args.
+        if ! check_enabled black; then
             skipped black
             warn "black (disabled)"
         elif command -v black >/dev/null 2>&1; then
             ran black
             set +e
-            pb_black="$(black --check --line-length=120 "$f" 2>&1)"
+            pb_black="$(black --check "${black_args[@]+"${black_args[@]}"}" "$f" 2>&1)"
             pb_black_rc=$?
             set -e
             if [ "$pb_black_rc" -eq 0 ]; then
@@ -663,11 +716,15 @@ else
             warn "black (not installed, skipping)"
         fi
 
-        # pylint (errors/warnings)
-        if command -v pylint >/dev/null 2>&1; then
+        # pylint (errors/warnings); harness flag --output-format=text is
+        # always kept; policy flags come from pylint_args.
+        if ! check_enabled pylint; then
+            skipped pylint
+            warn "pylint (disabled)"
+        elif command -v pylint >/dev/null 2>&1; then
             ran pylint
             set +e
-            pb_pylint="$(pylint --disable=C,R,E0401,E1123,W1510 --output-format=text "$f" 2>&1)"
+            pb_pylint="$(pylint --output-format=text "${pylint_args[@]+"${pylint_args[@]}"}" "$f" 2>&1)"
             pb_pylint_rc=$?
             set -e
             if [ "$pb_pylint_rc" -eq 0 ]; then
@@ -684,18 +741,20 @@ else
 
         # mypy (static types)
         #
-        # --ignore-missing-imports and --follow-imports=silent are required, not
-        # cosmetic: the image installs no project dependencies, so without them
-        # every third-party import reports import-not-found and drowns out real
-        # findings. This mirrors pylint running with E0401 disabled.
-        if [ "$mypy_enabled" = "off" ]; then
+        # --ignore-missing-imports and --follow-imports=silent are the default
+        # mypy_args (a checks.mypy.args override replaces them): the image
+        # installs no project dependencies, so without them every third-party
+        # import reports import-not-found and drowns out real findings. This
+        # mirrors pylint running with E0401 disabled. --cache-dir and
+        # --no-error-summary are harness flags and are always kept.
+        if ! check_enabled mypy; then
             skipped mypy
             warn "mypy (disabled)"
         elif command -v mypy >/dev/null 2>&1; then
             ran mypy
             set +e
-            pb_mypy="$(mypy --cache-dir="$MYPY_CACHE_DIR" --ignore-missing-imports \
-                --follow-imports=silent --no-error-summary "$f" 2>&1)"
+            pb_mypy="$(mypy --cache-dir="$MYPY_CACHE_DIR" --no-error-summary \
+                "${mypy_args[@]+"${mypy_args[@]}"}" "$f" 2>&1)"
             pb_mypy_rc=$?
             set -e
             if [ "$pb_mypy_rc" -eq 0 ]; then
@@ -710,15 +769,17 @@ else
             warn "mypy (not installed, skipping)"
         fi
 
-        # bandit (security)
-        if [ "$bandit_enabled" = "off" ]; then
+        # bandit (security); harness flags -q "$BANDIT_SEVERITY" -f custom
+        # --msg-template are always kept (severity is the bandit.severity
+        # option, not args); bandit has no default policy flags of its own.
+        if ! check_enabled bandit; then
             skipped bandit
             warn "bandit (disabled)"
         elif command -v bandit >/dev/null 2>&1; then
             ran bandit
             set +e
             pb_bandit="$(bandit -q "$BANDIT_SEVERITY" -f custom \
-                --msg-template "$BANDIT_TEMPLATE" "$f" 2>&1)"
+                --msg-template "$BANDIT_TEMPLATE" "${bandit_args[@]+"${bandit_args[@]}"}" "$f" 2>&1)"
             pb_bandit_rc=$?
             set -e
             if [ "$pb_bandit_rc" -eq 0 ]; then
@@ -767,13 +828,15 @@ else
         echo ""
         echo "  📝 $f"
 
-        # markdownlint
-        if command -v markdownlint >/dev/null 2>&1; then
+        # markdownlint; policy flags come from markdownlint_args (default:
+        # -c .markdownlint.json when that file exists in $PWD, computed once
+        # in the built-in defaults above, before the loader runs). The array
+        # expansion also replaces the former unquoted $MD_CONFIG word-split.
+        if ! check_enabled markdownlint; then
+            skipped markdownlint
+            warn "markdownlint (disabled)"
+        elif command -v markdownlint >/dev/null 2>&1; then
             ran markdownlint
-            MD_CONFIG=""
-            if [ -f ".markdownlint.json" ]; then
-                MD_CONFIG="-c .markdownlint.json"
-            fi
             # The former `|| true` on the next line was both redundant and
             # actively harmful: `set +e` already stops a non-zero exit from
             # aborting the script, while `|| true` made the command list itself
@@ -781,7 +844,7 @@ else
             # Every Markdown file therefore reported ✓ — including while the
             # binary was crashing outright with "Cannot find package 'commander'".
             set +e
-            md_output="$(markdownlint $MD_CONFIG "$f" 2>&1)"
+            md_output="$(markdownlint "${markdownlint_args[@]+"${markdownlint_args[@]}"}" "$f" 2>&1)"
             md_rc=$?
             set -e
             if [ "$md_rc" -eq 0 ]; then
@@ -826,7 +889,7 @@ mapfile -t json_files < <(find "$TARGET_DIR" -type f -name '*.json' ! -path '*/\
 
 if [ ${#yaml_files[@]} -eq 0 ] && [ ${#json_files[@]} -eq 0 ]; then
     echo "  (none found)"
-elif [ "$yaml_prettier_enabled" = "off" ] && [ "$json_prettier_enabled" = "off" ]; then
+elif ! check_enabled yaml_prettier && ! check_enabled json_prettier; then
     skipped yaml_prettier
     skipped json_prettier
     warn "YAML/JSON checks (disabled)"
@@ -837,15 +900,18 @@ elif command -v prettier >/dev/null 2>&1; then
         echo "  📋 $f"
 
         # yaml_prettier and json_prettier resolve independently -- each has
-        # its own "checks.<name>.enabled" in .multilint.json.
+        # its own "checks.<name>.enabled" and "checks.<name>.args" in
+        # .multilint.json. Harness flags --check --log-level error are
+        # always kept.
         if [[ "$f" == *.yaml || "$f" == *.yml ]]; then
-            if [ "$yaml_prettier_enabled" = "off" ]; then
+            if ! check_enabled yaml_prettier; then
                 skipped yaml_prettier
                 warn "yaml prettier (disabled)"
             else
                 ran yaml_prettier
                 set +e
-                prettier_output="$(prettier --check --log-level error "$f" 2>&1)"
+                prettier_output="$(prettier --check --log-level error \
+                    "${yaml_prettier_args[@]+"${yaml_prettier_args[@]}"}" "$f" 2>&1)"
                 prettier_rc=$?
                 set -e
                 if [ "$prettier_rc" -eq 0 ]; then
@@ -857,13 +923,14 @@ elif command -v prettier >/dev/null 2>&1; then
                 fi
             fi
         elif [[ "$f" == *.json ]]; then
-            if [ "$json_prettier_enabled" = "off" ]; then
+            if ! check_enabled json_prettier; then
                 skipped json_prettier
                 warn "json prettier (disabled)"
             else
                 ran json_prettier
                 set +e
-                prettier_output="$(prettier --check --log-level error "$f" 2>&1)"
+                prettier_output="$(prettier --check --log-level error \
+                    "${json_prettier_args[@]+"${json_prettier_args[@]}"}" "$f" 2>&1)"
                 prettier_rc=$?
                 set -e
                 if [ "$prettier_rc" -eq 0 ]; then
@@ -909,7 +976,7 @@ mapfile -t toml_files < <(find "$TARGET_DIR" -type f -name '*.toml' ! -path '*/\
 if [ ${#toml_files[@]} -eq 0 ]; then
     echo "  (none found)"
 else
-    if [ "$toml_sort_enabled" = "off" ]; then
+    if ! check_enabled toml_sort; then
         skipped toml_sort
         warn "TOML checks (disabled)"
     elif command -v toml-sort >/dev/null 2>&1; then
@@ -918,9 +985,11 @@ else
             echo ""
             echo "  📝 $f"
 
+            # Harness flag --check is always kept; policy flags come from
+            # toml_sort_args (default: --sort-keys).
             ran toml_sort
             set +e
-            toml_output="$(toml-sort --check --sort-keys "$f" 2>&1)"
+            toml_output="$(toml-sort --check "${toml_sort_args[@]+"${toml_sort_args[@]}"}" "$f" 2>&1)"
             toml_rc=$?
             set -e
             if [ "$toml_rc" -eq 0 ]; then
@@ -962,7 +1031,7 @@ info "Running security scans..."
 
 # security_secrets and security_dangerous_patterns resolve independently --
 # each has its own "checks.<name>.enabled" in .multilint.json.
-if [ "$security_secrets_enabled" = "off" ]; then
+if ! check_enabled security_secrets; then
     skipped security_secrets
     warn "security_secrets (disabled)"
 else
@@ -1013,7 +1082,7 @@ else
     done
 fi
 
-if [ "$security_dangerous_patterns_enabled" = "off" ]; then
+if ! check_enabled security_dangerous_patterns; then
     skipped security_dangerous_patterns
     warn "security_dangerous_patterns (disabled)"
 else
@@ -1060,7 +1129,7 @@ done
 # ---------------------------------------------------------------------------
 info "Running gitleaks..."
 
-if [ "$gitleaks_enabled" = "off" ]; then
+if ! check_enabled gitleaks; then
     skipped gitleaks
     warn "gitleaks (disabled)"
 elif command -v gitleaks >/dev/null 2>&1; then
@@ -1110,17 +1179,23 @@ elif command -v gitleaks >/dev/null 2>&1; then
 
     ran gitleaks
     set +e
+    # Project args (checks.gitleaks.args, default empty) are inserted before
+    # --verbose; the harness flags around them (detect, --source/--no-git,
+    # config args, --log-opts, --verbose --no-color --no-banner) are always
+    # kept regardless of args.
     if [ -n "$gitleaks_repo" ]; then
         # History mode. GITLEAKS_DEPTH=all walks every commit; the default limits it to the most
         # recent one, which is what makes this affordable to run after a single edit.
         if [ "$GITLEAKS_DEPTH" = "all" ]; then
             gitleaks_output="$(gitleaks detect --source "$gitleaks_repo" \
                 "${gitleaks_config_args[@]}" \
+                "${gitleaks_args[@]+"${gitleaks_args[@]}"}" \
                 --verbose --no-color --no-banner 2>&1)"
         else
             gitleaks_output="$(gitleaks detect --source "$gitleaks_repo" \
                 "${gitleaks_config_args[@]}" \
                 --log-opts="-1" \
+                "${gitleaks_args[@]+"${gitleaks_args[@]}"}" \
                 --verbose --no-color --no-banner 2>&1)"
         fi
     else
@@ -1130,6 +1205,7 @@ elif command -v gitleaks >/dev/null 2>&1; then
         # turns a permanent "skipped" into a real verdict.
         gitleaks_output="$(gitleaks detect --no-git --source "$TARGET_DIR" \
             "${gitleaks_config_args[@]}" \
+            "${gitleaks_args[@]+"${gitleaks_args[@]}"}" \
             --verbose --no-color --no-banner 2>&1)"
     fi
     gitleaks_rc=$?
