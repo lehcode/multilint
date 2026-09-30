@@ -562,7 +562,7 @@ else
         fi
 
         # ShellCheck — policy flags come from shellcheck_args (default:
-        # excludes SC1091/SC2155/SC2086, disables style).
+        # excludes SC1091/SC2155/SC2086, reports down to style severity).
         if ! check_enabled shellcheck; then
             skipped shellcheck
             warn "shellcheck (disabled)"

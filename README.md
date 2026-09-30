@@ -390,9 +390,7 @@ When the multilint agent is selected, OpenCode loads `agents/multilint.md` as th
 
 ### Configuration
 
-| Env var | Default | Description |
-|---------|---------|-------------|
-| `MULTILINT_HOST` | `http://localhost:8591` | Multilint HTTP API base URL (plugin only) |
+The OpenCode plugin reads no environment variables. It runs the image named by the `image` setting (see "Host-plugin settings" above), else `lehcode/multilint:latest`, and lints with the project's `.multilint.json`.
 
 ### Limitations
 

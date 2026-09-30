@@ -3,6 +3,7 @@
 # pylint: disable=redefined-outer-name,subprocess-run-check
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -787,6 +788,8 @@ class TestSliceThreeEssentials:
         """checks.<name>.args REPLACES that check's built-in policy flags; harness flags are
         always kept, even when args is an empty list.
         """
+        if not (shutil.which("flake8") and shutil.which("black")):
+            pytest.skip("flake8 and black must be installed: a missing tool reports skipped, not failed")
         proj = Path(tmp_dir) / "proj"
         proj.mkdir()
         # A single line over flake8's default 120-column limit (E501); nothing else about this
