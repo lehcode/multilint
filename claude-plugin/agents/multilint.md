@@ -11,16 +11,21 @@ per request. There is no server to connect to and no MCP tool to call.
 ## Invocation
 
 ```bash
+IMAGE="$(python3 claude-plugin/scripts/lint_changed.py --get image 2>/dev/null || true)"
+IMAGE="${IMAGE:-lehcode/multilint:latest}"
+
 docker run --rm --network none --memory 2g --cpus 2 \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=${ROOT},target=${ROOT},readonly" \
   --workdir "${ROOT}" \
-  --entrypoint bash "${MULTILINT_IMAGE:-lehcode/multilint:latest}" \
+  --entrypoint bash "${IMAGE}" \
   -c 'bash /usr/local/bin/lint.sh "$1" --format json' _ "${TARGET}"
 ```
 
 `ROOT` is an absolute host path — the git root, or the directory containing what you are linting.
 `TARGET` is relative to `ROOT`. Pass a directory to lint a tree, or a single file to lint one file.
+`IMAGE` is no longer an environment variable — see "Changing image or search-ceiling settings"
+below for where it comes from.
 
 | Choice | Reason |
 |---|---|
@@ -32,6 +37,66 @@ docker run --rm --network none --memory 2g --cpus 2 \
 | `--mount`, not `-v` | `-v src:dst:opts` is colon-delimited and easy to corrupt. In zsh, `"$PWD:$PWD:ro"` becomes `.../multilint:.../multilinto`, because `:r` is a parameter modifier that applies even inside double quotes — mounting read-write at the wrong target and linting an empty directory, which reports success. |
 
 Quote `${ROOT}` and use `${...}` braces. An unbraced `$ROOT:ro` hits the same zsh trap.
+
+## Configuration
+
+`lint.sh` reads all linter configuration from `.multilint.json` in `${ROOT}` — there is no
+environment-variable layer for any threshold, enablement flag, or tool option (user decision,
+2026-09-30: environment variables are not a multilint configuration surface). It resolves the file
+as `$PWD/.multilint.json` first, then `<target-dir>/.multilint.json` when the target argument is a
+directory; a single-file target never falls back, so `--workdir` must point at the project root,
+not a subdirectory.
+
+Per check, either a flat `"<check>": <threshold>` or an object `"checks.<name>": {"enabled":
+<bool>, "threshold": <int>, "args": [<string>, ...]}`. `checks.<name>.enabled: false` skips that
+check entirely, for any of the 16 checks (including `bash_syntax`, `shellcheck`, `flake8`,
+`pylint`, and `markdownlint`). `args` REPLACES that check's built-in policy flags — never its
+harness flags, which are always kept regardless of `args` — and `"args": []` runs the check with
+harness flags only. `gitleaks`, `bandit`, and `mypy` also accept an options object
+(`depth`/`config`, `severity`, `cache_dir` respectively).
+
+| Check | Harness flags (always kept) | Default policy flags (`args` replaces these) |
+|---|---|---|
+| `bash_syntax` | `-n` | n/a — `args` unsupported |
+| `shellcheck` | none | `-e SC1091 -e SC2155 -e SC2086 -S style` |
+| `bashate` | none | `-i E006` |
+| `shfmt` | `-d` | `-i 4` |
+| `flake8` | none | `--max-line-length=120 --extend-ignore=E203,E111,E121,E124,BLK100` |
+| `black` | `--check` | `--line-length=120` |
+| `pylint` | `--output-format=text` | `--disable=C,R,E0401,E1123,W1510` |
+| `mypy` | `--cache-dir=<mypy.cache_dir>` `--no-error-summary` | `--ignore-missing-imports --follow-imports=silent` |
+| `bandit` | `-q <bandit.severity> -f custom --msg-template ...` | empty — severity is `bandit.severity`, not `args` |
+| `markdownlint` | none | `-c .markdownlint.json` when that file exists in `$PWD`, else empty |
+| `yaml_prettier` / `json_prettier` | `--check --log-level error` | empty |
+| `toml_sort` | `--check` | `--sort-keys` |
+| `security_secrets` / `security_dangerous_patterns` | grep pattern | n/a — `args` unsupported |
+| `gitleaks` | `detect`, `--source`/`--no-git --source`, config/depth flags, `--verbose --no-color --no-banner` | empty |
+
+A malformed file, an unrecognized key, or a wrongly typed value produces a warning instead of a
+silent fallback to zero: stderr in text mode, and a top-level `"warnings"` array (always present,
+`[]` when empty) in JSON mode. **Report `warnings` to the user whenever it is non-empty** — it
+means the project's own `.multilint.json` has a problem the user should fix, separate from any
+check's findings.
+
+## Changing image or search-ceiling settings
+
+`MULTILINT_IMAGE` and `MULTILINT_SEARCH_CEILING` are retired along with every other environment
+variable. The container image both plugins run, and the highest directory the Python hook may
+search for a project root, now live in a small SQLite `settings` table managed by
+`claude-plugin/scripts/lint_changed.py`'s CLI mode:
+
+```bash
+python3 claude-plugin/scripts/lint_changed.py --set image local/multilint:dev
+python3 claude-plugin/scripts/lint_changed.py --get image
+python3 claude-plugin/scripts/lint_changed.py --unset image
+python3 claude-plugin/scripts/lint_changed.py --set search_ceiling /home/user/projects
+```
+
+Only `image` and `search_ceiling` are accepted keys; anything else exits non-zero and writes
+nothing. A key with no stored setting falls back to its built-in default
+(`lehcode/multilint:latest` for `image`, the user's home directory for `search_ceiling`). If the
+user asks to change the image or the search ceiling, run `--set` with their value — do not add
+these two settings to `.multilint.json`, since they configure the plugin process, not a check.
 
 ## Reading the result
 
