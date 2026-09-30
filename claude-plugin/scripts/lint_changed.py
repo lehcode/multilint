@@ -16,12 +16,19 @@ It is the only thing mounted, read-only.
 One container per hook invocation, not per file: container startup is ~0.36s over a warm in-process
 call, so a ten-file changeset amortises it once (measured 6.35s) instead of ten times (8.05s).
 
-Change detection has two modes:
+The target is the file the hook reported, and only that file. An earlier version collected every
+dirty and untracked file in the repository and linted up to 25 of them per edit, which meant one
+`Write` in a dirty tree reported on files the user had not touched. The hook fires once per write
+with one `file_path`; that file is the subject.
 
-- Under git, `git diff` plus `git ls-files --others` give the changed set directly, so unstaged,
-  staged and untracked edits all count.
-- Outside git, a SQLite table of (size, mtime_ns, sha256) per path records what was last seen, and
-  files whose digest differs (or that are new) are the changed set.
+A SQLite table records (size, mtime_ns, sha256) per path, so re-saving identical bytes is a no-op
+rather than a second identical verdict. It also caches base folder -> repository root, because every
+file in a directory shares its repository and re-walking the ancestors on every edit is wasted work.
+Cached roots are re-stat'ed before use: `git init`, `rm -rf .git` and a clone all change the answer,
+and a stale cache would serve a wrong one.
+
+The repository search stops at $HOME. Unbounded, it reaches `/`, and since the scope root is what
+gets bind-mounted, an edit to a file in a system directory mounted that directory.
 
 The database deliberately lives outside ~/.claude/. Writes under ~/.claude/plugins/data/ raise the
 protected-directory permission prompt even under bypassPermissions
@@ -48,22 +55,17 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 LINTABLE_SUFFIXES = {".sh", ".bash", ".py", ".md", ".yaml", ".yml", ".json", ".toml"}
 
-# Directory names skipped when walking a non-git tree. Mirrors the prunes in lint.sh so the hook
-# does not spend time hashing files the linters would never look at.
-SKIP_DIRS = {"node_modules", "venv", ".venv", "__pycache__", "cache", "output", "dist"}
-
-# Upper bound on files hashed in one non-git invocation, so a hook on a huge tree stays responsive.
-MAX_SCAN_FILES = 2000
-
-# Upper bound on files handed to one container. The changed set is whatever the repository has dirty,
-# which is not bounded by the edit that triggered the hook: editing one file in a tree with 83 dirty
-# files queues 52 lint runs, and a larger tree would run past RUN_TIMEOUT_SECONDS and report nothing
-# at all. Truncating and saying so beats timing out silently. The edited file is always kept.
-MAX_LINT_TARGETS = 25
+# SKIP_DIRS, MAX_SCAN_FILES and MAX_LINT_TARGETS used to live here. They existed to make a tree walk
+# survivable: the hook collected every dirty and untracked file in the repository, pruned the
+# directories it knew to be uninteresting, hashed up to 2000 of them, and capped the result at 25 per
+# container. All three are gone with the walk. The hook receives one file_path per invocation, so a
+# 2000-file "changed set" never described 2000 simultaneous saves — it described a dirty repository —
+# and a cap on a list that can only hold one element is not a guard.
 
 # Published on Docker Hub, which serves anonymous pulls; ghcr.io carries the same tags but can
 # require a token. Override with MULTILINT_IMAGE to test a local build.
@@ -87,21 +89,15 @@ FILE_MARKER = "===MULTILINT-FILE==="
 # effect, instead of silently ignoring it.
 RETIRED_ENV_VARS = ("MULTILINT_URL", "MULTILINT_PATH_MAP")
 
-# gitleaks scans git history, and lint.sh only runs it when "$TARGET_DIR/.git" exists. Targets here
-# are individual files, so that test can never pass and the check is always reported skipped. That
-# is structural rather than informative, so it is filtered out of the skipped set to avoid emitting
-# the same non-finding after every single edit. Directory-scoped runs still exercise it.
-STRUCTURALLY_SKIPPED = frozenset({"gitleaks"})
+# Nothing is filtered out of the skipped set any more. gitleaks used to be listed here because
+# lint.sh gated it on "$TARGET_DIR/.git" and a single-file target can never satisfy that, so it was
+# reported skipped after every edit. lint.sh now selects `--no-git` when there is no repository, so
+# the check produces a real verdict either way and a skip means something again.
+STRUCTURALLY_SKIPPED: frozenset[str] = frozenset()
 
 # Cap on the text handed back to Claude. The full lint output of a failing directory runs to several
 # kilobytes; only the failing lines are worth the context.
 MAX_CONTEXT_CHARS = 4000
-
-GIT_CHANGE_COMMANDS = (
-    ("git", "diff", "--name-only", "HEAD"),
-    ("git", "diff", "--name-only", "--cached"),
-    ("git", "ls-files", "--others", "--exclude-standard"),
-)
 
 
 def state_dir() -> Path:
@@ -211,35 +207,42 @@ def edited_file_from_payload(payload: dict) -> Path | None:
     return None
 
 
+def search_ceiling() -> Path:
+    """Highest directory the repository search may reach.
+
+    The user's home directory. MULTILINT_SEARCH_CEILING overrides it, for a checkout kept outside
+    $HOME.
+    """
+    override = os.environ.get("MULTILINT_SEARCH_CEILING")
+    if override:
+        return Path(override).expanduser()
+    return Path.home()
+
+
 def find_git_root(start: Path) -> Path | None:
-    """Nearest ancestor containing a .git entry, or None."""
-    for directory in (start, *start.parents):
+    """Nearest ancestor containing a .git entry, searching no higher than $HOME.
+
+    The bound is the point of this function. An unbounded walk reaches `/`, and because the scope
+    root is what gets bind-mounted into the lint container, an edit to a file sitting directly in a
+    system directory made that directory the mount. That is not hypothetical: the state database
+    accumulated a full recursive walk of /etc, which can only happen if /etc became the scope root.
+
+    A path outside the ceiling has no ancestors worth searching, so None is returned without a
+    single stat. Blocklisting directory names would have been the fragile version of this.
+    """
+    ceiling = search_ceiling().resolve()
+    try:
+        resolved = start.resolve()
+    except OSError:
+        return None
+    if resolved != ceiling and ceiling not in resolved.parents:
+        return None
+    for directory in (resolved, *resolved.parents):
         if (directory / ".git").exists():
             return directory
+        if directory == ceiling:
+            break
     return None
-
-
-def changed_under_git(root: Path) -> set[Path]:
-    """Changed, staged and untracked files known to git, as absolute paths."""
-    changed: set[Path] = set()
-    for command in GIT_CHANGE_COMMANDS:
-        try:
-            proc = subprocess.run(
-                command,
-                cwd=root,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if proc.returncode != 0:
-            continue
-        for line in proc.stdout.splitlines():
-            if line:
-                changed.add(root / line)
-    return changed
 
 
 def digest_of(path: Path) -> str:
@@ -251,59 +254,161 @@ def digest_of(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def candidates_under(directory: Path) -> list[Path]:
-    """Lintable files in a tree, pruning the directories lint.sh also skips."""
-    found: list[Path] = []
-    for current_root, subdirs, filenames in os.walk(directory):
-        subdirs[:] = [d for d in subdirs if d not in SKIP_DIRS and not d.startswith(".")]
-        for filename in filenames:
-            if Path(filename).suffix in LINTABLE_SUFFIXES:
-                found.append(Path(current_root) / filename)
-                if len(found) >= MAX_SCAN_FILES:
-                    return found
-    return found
+def now_stamp() -> str:
+    """Event timestamp: ISO-8601, UTC, second resolution.
 
-
-def changed_via_sqlite(directory: Path) -> set[Path]:
-    """Files under a non-git tree whose content differs from what was last recorded.
-
-    The read, comparison and upsert share one transaction, and WAL is enabled, because several
-    sessions can run this hook at the same time.
+    Text rather than an epoch integer because these rows are read by a human diagnosing why a file
+    was or was not linted, and ISO-8601 sorts correctly as a string anyway.
     """
-    database = state_dir()
-    try:
-        database.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return set()
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    changed: set[Path] = set()
+
+def open_state() -> sqlite3.Connection | None:
+    """Open the state database and bring its schema up to date, or None if unusable.
+
+    Migration rather than CREATE TABLE alone: this database already exists in the field with the
+    original four columns, so the added ones arrive through ALTER TABLE. A duplicate-column error
+    means another process migrated first, which is a success, not a failure.
+    """
+    directory = state_dir()
     try:
-        with sqlite3.connect(database / "changes.db", timeout=10) as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS seen ("
-                "path TEXT PRIMARY KEY, size INTEGER, mtime_ns INTEGER, digest TEXT)"
-            )
-            rows = dict(connection.execute("SELECT path, digest FROM seen").fetchall())
-            updates = []
-            for candidate in candidates_under(directory):
-                try:
-                    stat = candidate.stat()
-                    digest = digest_of(candidate)
-                except OSError:
-                    continue
-                key = str(candidate)
-                if rows.get(key) != digest:
-                    changed.add(candidate)
-                updates.append((key, stat.st_size, stat.st_mtime_ns, digest))
-            connection.executemany(
-                "INSERT INTO seen (path, size, mtime_ns, digest) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(path) DO UPDATE SET size=excluded.size, "
-                "mtime_ns=excluded.mtime_ns, digest=excluded.digest",
-                updates,
-            )
+        directory.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(directory / "changes.db", timeout=10)
+    except (OSError, sqlite3.Error):
+        return None
+
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS seen (path TEXT PRIMARY KEY, size INTEGER, mtime_ns INTEGER, digest TEXT)"
+        )
+        existing = {row[1] for row in connection.execute("PRAGMA table_info(seen)")}
+        for column, ddl in (
+            ("in_git", "in_git INTEGER"),
+            ("git_root", "git_root TEXT"),
+            ("first_seen_at", "first_seen_at TEXT"),
+            ("last_seen_at", "last_seen_at TEXT"),
+            ("last_linted_at", "last_linted_at TEXT"),
+        ):
+            if column not in existing:
+                connection.execute(f"ALTER TABLE seen ADD COLUMN {ddl}")
+        # Base folder -> repository root. Every file in a directory shares its repository, so one
+        # cached answer serves all of them and a later edit costs a string comparison rather than an
+        # ancestor walk. git_root is NULL when the folder is in no repository, which is a cached
+        # answer too, not a cache miss.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS folders ("
+            "folder TEXT PRIMARY KEY, git_root TEXT, resolved_at TEXT, last_used_at TEXT)"
+        )
+        connection.commit()
     except sqlite3.Error:
-        return set()
+        connection.close()
+        return None
+    return connection
+
+
+def cached_git_root(connection: sqlite3.Connection | None, folder: Path) -> tuple[Path | None, bool]:
+    """Repository root for a folder, from cache when the cache is still true.
+
+    Returns (root, from_cache). A cached root is re-stat'ed before being trusted, because the answer
+    is not stable: `git init`, `rm -rf .git`, a clone or a moved directory all change it. One stat is
+    cheaper than the ancestor walk it replaces and cannot serve a wrong answer. A cached "no
+    repository" is re-checked the same way, since a repository can appear where there was none.
+    """
+    key = str(folder)
+    stamp = now_stamp()
+    if connection is None:
+        return find_git_root(folder), False
+
+    row = None
+    try:
+        row = connection.execute("SELECT git_root FROM folders WHERE folder = ?", (key,)).fetchone()
+    except sqlite3.Error:
+        return find_git_root(folder), False
+
+    if row is not None:
+        recorded = row[0]
+        if recorded and (Path(recorded) / ".git").exists():
+            try:
+                connection.execute("UPDATE folders SET last_used_at = ? WHERE folder = ?", (stamp, key))
+                connection.commit()
+            except sqlite3.Error:
+                pass
+            return Path(recorded), True
+        if recorded is None and find_git_root(folder) is None:
+            try:
+                connection.execute("UPDATE folders SET last_used_at = ? WHERE folder = ?", (stamp, key))
+                connection.commit()
+            except sqlite3.Error:
+                pass
+            return None, True
+
+    resolved = find_git_root(folder)
+    try:
+        connection.execute(
+            "INSERT INTO folders (folder, git_root, resolved_at, last_used_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(folder) DO UPDATE SET git_root=excluded.git_root, "
+            "resolved_at=excluded.resolved_at, last_used_at=excluded.last_used_at",
+            (key, str(resolved) if resolved else None, stamp, stamp),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        pass
+    return resolved, False
+
+
+def record_and_check(
+    connection: sqlite3.Connection | None,
+    path: Path,
+    git_root: Path | None,
+) -> bool:
+    """Record what this file looks like now; return True when its content differs from last time.
+
+    Applies to repository files as well as loose ones. Under git the file is dirty by definition once
+    it has been written, so the digest is the only thing that distinguishes "saved with changes" from
+    "saved identical content", and re-linting the latter tells the user nothing.
+
+    Without a database every write counts as a change: linting twice is wasteful, but skipping a real
+    change is a false clean, and only one of those two errors is acceptable.
+    """
+    try:
+        stat = path.stat()
+        digest = digest_of(path)
+    except OSError:
+        return False
+    if connection is None:
+        return True
+
+    key = str(path)
+    stamp = now_stamp()
+    try:
+        row = connection.execute("SELECT digest FROM seen WHERE path = ?", (key,)).fetchone()
+        changed = row is None or row[0] != digest
+        connection.execute(
+            "INSERT INTO seen (path, size, mtime_ns, digest, in_git, git_root, "
+            "first_seen_at, last_seen_at, last_linted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, "
+            "digest=excluded.digest, in_git=excluded.in_git, git_root=excluded.git_root, "
+            "first_seen_at=COALESCE(seen.first_seen_at, excluded.first_seen_at), "
+            "last_seen_at=excluded.last_seen_at, "
+            "last_linted_at=CASE WHEN excluded.last_linted_at IS NULL THEN seen.last_linted_at "
+            "ELSE excluded.last_linted_at END",
+            (
+                key,
+                stat.st_size,
+                stat.st_mtime_ns,
+                digest,
+                1 if git_root is not None else 0,
+                str(git_root) if git_root else None,
+                stamp,
+                stamp,
+                stamp if changed else None,
+            ),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        return True
     return changed
 
 
@@ -379,24 +484,6 @@ def skipped_checks(document: dict) -> list[str]:
     return [n for n in names if isinstance(n, str) and n not in STRUCTURALLY_SKIPPED]
 
 
-def select_targets(all_targets: list[str], edited: str | None) -> tuple[list[str], int]:
-    """Trim the changed set to MAX_LINT_TARGETS, keeping the edited file. Returns (kept, dropped).
-
-    The changed set is whatever the repository has dirty, which the triggering edit does not bound.
-    One edit in a tree with 83 dirty files queues 52 lint runs; a larger tree runs past the container
-    timeout and reports nothing at all, which is the worst outcome available. Truncating and saying so
-    is strictly better than a silent timeout.
-    """
-    if len(all_targets) <= MAX_LINT_TARGETS:
-        return list(all_targets), 0
-    if edited in all_targets:
-        others = [path for path in all_targets if path != edited]
-        kept = [edited] + others[: MAX_LINT_TARGETS - 1]
-    else:
-        kept = list(all_targets[:MAX_LINT_TARGETS])
-    return kept, len(all_targets) - len(kept)
-
-
 def failing_lines(stdout: str) -> list[str]:
     """Only the lines that report a problem, so the context stays small."""
     return [line.rstrip() for line in stdout.splitlines() if "✗" in line or "⚠" in line]
@@ -419,42 +506,36 @@ def main() -> int:
     if not edited.is_absolute():
         edited = (Path(payload.get("cwd") or ".") / edited).resolve()
 
-    git_root = find_git_root(edited.parent)
-    if git_root is not None:
-        scope_root = git_root
-        changed = changed_under_git(git_root)
-    else:
-        scope_root = edited.parent
-        changed = changed_via_sqlite(edited.parent)
-    changed.add(edited)
-
-    # Paths are made relative to the scope root because that is the working directory inside the
-    # container. Anything outside the scope root is dropped: it is not mounted, so linting it would
-    # report a missing file rather than a finding. Under git that is rare — the git root encloses the
-    # changed set by construction — but an edit can still name a file elsewhere.
-    targets: dict[str, None] = {}
-    for candidate in sorted(changed):
-        if candidate.suffix not in LINTABLE_SUFFIXES or not candidate.is_file():
-            continue
-        try:
-            relative = candidate.resolve().relative_to(scope_root.resolve())
-        except (ValueError, OSError):
-            continue
-        targets[relative.as_posix()] = None
-    if not targets:
+    if not edited.is_file():
         return 0
 
-    # Keep the edited file whatever else is dropped: it is the one just touched, and the only one the
-    # user is certain to care about right now.
-    edited_relative = None
+    # One connection for the whole invocation: the git-root cache and the digest record both use it,
+    # and opening it twice would be two migrations and two locks.
+    state = open_state()
     try:
-        edited_relative = edited.resolve().relative_to(scope_root.resolve()).as_posix()
+        git_root, _from_cache = cached_git_root(state, edited.parent)
+
+        # Scope root is the repository when there is one, because lint.sh resolves .markdownlint.json
+        # against the working directory and gitleaks needs .git to scan history. Outside a repository
+        # it is the file's own directory, which is as narrow as the mount can be while still letting
+        # the container see the file.
+        scope_root = git_root if git_root is not None else edited.parent
+
+        if not record_and_check(state, edited, git_root):
+            # Same bytes as last time. Re-linting would produce the same verdict the user has already
+            # seen, so saying nothing is the correct answer rather than a missed check.
+            return 0
+    finally:
+        if state is not None:
+            state.close()
+
+    # Relative to the scope root because that is the container's working directory.
+    try:
+        relative = edited.resolve().relative_to(scope_root.resolve()).as_posix()
     except (ValueError, OSError):
-        pass
+        return 0
 
-    selected, truncated = select_targets(list(targets), edited_relative)
-
-    results = run_lint(scope_root, selected)
+    results = run_lint(scope_root, [relative])
     if not results:
         return 0
 
@@ -478,20 +559,12 @@ def main() -> int:
         context = "\n\n".join(findings)[:MAX_CONTEXT_CHARS]
         if not context:
             context = "multilint reported failing checks but produced no parsable output."
-        notices.append(f"multilint found failing checks in {failed} changed file(s).\n\n{context}")
+        notices.append(f"multilint found failing checks in {relative}.\n\n{context}")
     if skipped:
         # Reported even when everything passed. A check that did not run is not a check that passed,
         # and the old contract could not tell the two apart.
         notices.append(
-            "multilint could not run these checks, so the files are unverified for them: " + ", ".join(sorted(skipped))
-        )
-    if truncated:
-        # Said out loud rather than silently dropped: the whole point of this change is that an
-        # unchecked file must never look like a checked one.
-        notices.append(
-            f"multilint checked {len(selected)} of {len(targets)} changed files "
-            f"({truncated} not checked, limit {MAX_LINT_TARGETS} per run). "
-            "Commit or stash unrelated work to narrow the changed set."
+            f"multilint could not run these checks, so {relative} is unverified for them: " + ", ".join(sorted(skipped))
         )
     for name in retired_env_in_use():
         notices.append(
