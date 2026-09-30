@@ -68,7 +68,8 @@ LINTABLE_SUFFIXES = {".sh", ".bash", ".py", ".md", ".yaml", ".yml", ".json", ".t
 # and a cap on a list that can only hold one element is not a guard.
 
 # Published on Docker Hub, which serves anonymous pulls; ghcr.io carries the same tags but can
-# require a token. Override with MULTILINT_IMAGE to test a local build.
+# require a token. Override the "image" hook-setting to run a local build instead
+# (`python3 lint_changed.py --set image local/build:dev`).
 DEFAULT_IMAGE = "lehcode/multilint:latest"
 
 CONTAINER_LINT_SH = "/usr/local/bin/lint.sh"
@@ -85,9 +86,12 @@ CPU_LIMIT = "2"
 # documents can be split back apart. Chosen to be something no linter emits.
 FILE_MARKER = "===MULTILINT-FILE==="
 
-# Read but no longer honoured. Kept only to tell the user why their configuration stopped taking
-# effect, instead of silently ignoring it.
-RETIRED_ENV_VARS = ("MULTILINT_URL", "MULTILINT_PATH_MAP")
+# The two host-plugin settings that are not linter configuration -- they shape how the plugin runs,
+# not what a check does -- live in a `settings` table inside the same state database, written only
+# through this CLI (`--set`/`--get`/`--unset`) and read read-only by the OpenCode plugin. Environment
+# variables are not a multilint configuration surface (user decision, 2026-09-30); MULTILINT_IMAGE,
+# MULTILINT_SEARCH_CEILING and MULTILINT_STATE_DIR are retired with no environment replacement.
+SETTINGS_KEYS = ("image", "search_ceiling")
 
 # Nothing is filtered out of the skipped set any more. gitleaks used to be listed here because
 # lint.sh gated it on "$TARGET_DIR/.git" and a single-file target can never satisfy that, so it was
@@ -101,23 +105,83 @@ MAX_CONTEXT_CHARS = 4000
 
 
 def state_dir() -> Path:
-    """Directory holding the change-tracking database."""
-    override = os.environ.get("MULTILINT_STATE_DIR")
-    if override:
-        return Path(override)
+    """Directory holding the change-tracking and settings database.
+
+    Fixed path, no override: XDG_STATE_HOME is honoured because it is the XDG base-directory
+    standard, not a multilint-specific control. MULTILINT_STATE_DIR is retired with no replacement.
+    """
     xdg = os.environ.get("XDG_STATE_HOME")
     base = Path(xdg) if xdg else Path.home() / ".local" / "state"
     return base / "multilint"
 
 
+def has_control_char(value: str) -> bool:
+    """True if value contains a C0 control character or DEL, mirroring the .multilint.json loader."""
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
+def check_setting_key(key: str) -> None:
+    """Raise ValueError unless key is one of SETTINGS_KEYS, so a typo never reads as success."""
+    if key not in SETTINGS_KEYS:
+        raise ValueError(f"unknown settings key: {key!r} (allowed: {', '.join(SETTINGS_KEYS)})")
+
+
+def read_setting(key: str) -> str | None:
+    """Value stored for key, or None on a missing db/table/row or any sqlite3.Error/OSError."""
+    try:
+        # Read-only URI: a plain connect() would create an empty changes.db as a side effect of a
+        # lookup. mode=ro fails on a missing file instead, which is the "nothing set" answer.
+        uri = (state_dir() / "changes.db").as_uri() + "?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=10)
+    except (OSError, sqlite3.Error):
+        return None
+    try:
+        row = connection.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    return row[0] if row is not None else None
+
+
+def write_setting(key: str, value: str) -> None:
+    """Validate and upsert a setting. Raises ValueError on an unknown key or an invalid value."""
+    check_setting_key(key)
+    if value == "" or has_control_char(value):
+        raise ValueError(f"invalid value for {key!r}: must be non-empty with no control characters")
+    # A relative ceiling would resolve against whatever directory the hook happens to run in.
+    if key == "search_ceiling" and not Path(value).expanduser().is_absolute():
+        raise ValueError(f"invalid value for {key!r}: must be an absolute path (or start with ~)")
+    connection = open_state()
+    if connection is None:
+        raise ValueError(f"could not open the settings database at {state_dir() / 'changes.db'}")
+    try:
+        connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value, now_stamp()),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def unset_setting(key: str) -> None:
+    """Delete key's row, if present. Not an error when there was nothing to delete."""
+    check_setting_key(key)
+    connection = open_state()
+    if connection is None:
+        return
+    try:
+        connection.execute("DELETE FROM settings WHERE key = ?", (key,))
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def resolve_image() -> str:
-    """Image to run. MULTILINT_IMAGE overrides the published default."""
-    return os.environ.get("MULTILINT_IMAGE") or DEFAULT_IMAGE
-
-
-def retired_env_in_use() -> list[str]:
-    """Names of retired variables the user still has set."""
-    return [name for name in RETIRED_ENV_VARS if os.environ.get(name)]
+    """Image to run. The "image" hook-setting overrides the published default."""
+    return read_setting("image") or DEFAULT_IMAGE
 
 
 def container_program() -> str:
@@ -210,13 +274,11 @@ def edited_file_from_payload(payload: dict) -> Path | None:
 def search_ceiling() -> Path:
     """Highest directory the repository search may reach.
 
-    The user's home directory. MULTILINT_SEARCH_CEILING overrides it, for a checkout kept outside
-    $HOME.
+    The user's home directory, unless the "search_ceiling" hook-setting overrides it, for a
+    checkout kept outside $HOME.
     """
-    override = os.environ.get("MULTILINT_SEARCH_CEILING")
-    if override:
-        return Path(override).expanduser()
-    return Path.home()
+    value = read_setting("search_ceiling")
+    return Path(value).expanduser() if value else Path.home()
 
 
 def find_git_root(start: Path) -> Path | None:
@@ -300,6 +362,9 @@ def open_state() -> sqlite3.Connection | None:
             "CREATE TABLE IF NOT EXISTS folders ("
             "folder TEXT PRIMARY KEY, git_root TEXT, resolved_at TEXT, last_used_at TEXT)"
         )
+        # Host-plugin settings (image, search_ceiling) that replaced MULTILINT_IMAGE and
+        # MULTILINT_SEARCH_CEILING. Same database, same migration, so there is one file and one lock.
+        connection.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
         connection.commit()
     except sqlite3.Error:
         connection.close()
@@ -489,6 +554,18 @@ def failing_lines(stdout: str) -> list[str]:
     return [line.rstrip() for line in stdout.splitlines() if "✗" in line or "⚠" in line]
 
 
+def config_warnings(document: dict) -> list[str]:
+    """The lint.sh "warnings" field, or [] when the field is missing or malformed.
+
+    Independent of return_code: a malformed .multilint.json is a configuration mistake the user
+    needs to hear about even on a run that otherwise passed every check.
+    """
+    warnings = document.get("warnings")
+    if not isinstance(warnings, list):
+        return []
+    return [w for w in warnings if isinstance(w, str)]
+
+
 def main() -> int:
     """Read the hook payload, lint what changed, and report failures on stdout."""
     try:
@@ -541,9 +618,11 @@ def main() -> int:
 
     findings: list[str] = []
     skipped: set[str] = set()
+    warnings: list[str] = []
     failed = 0
     for name, document, detail in results:
         skipped.update(skipped_checks(document))
+        warnings.extend(config_warnings(document))
         if document.get("return_code") == 0:
             continue
         failed += 1
@@ -566,12 +645,10 @@ def main() -> int:
         notices.append(
             f"multilint could not run these checks, so {relative} is unverified for them: " + ", ".join(sorted(skipped))
         )
-    for name in retired_env_in_use():
-        notices.append(
-            f"{name} is set but no longer used. multilint now runs a container per invocation "
-            "instead of calling an HTTP API, so there is no URL or path map to configure. "
-            "Set MULTILINT_IMAGE to choose a different image."
-        )
+    if warnings:
+        # Independent of return_code: a malformed .multilint.json is worth surfacing even when the
+        # run otherwise passed, the same way defect 1 (a silently-ignored threshold) went unnoticed.
+        notices.append("multilint: config warning: " + "; ".join(warnings))
 
     if not notices:
         return 0
@@ -595,5 +672,37 @@ def main() -> int:
     return 0
 
 
+def run_settings_cli(argv: list[str]) -> int:
+    """Dispatch --set/--get/--unset. Returns the process exit code; never touches stdin.
+
+    Kept separate from main() so the two entry points can never be confused: the hook is always
+    invoked with an empty argv and reads its payload from stdin, while the CLI is always invoked
+    with a recognized flag and never reads stdin.
+    """
+    if not argv:
+        return 1
+    action, rest = argv[0], argv[1:]
+    try:
+        if action == "--set" and len(rest) == 2:
+            write_setting(rest[0], rest[1])
+            return 0
+        if action == "--get" and len(rest) == 1:
+            check_setting_key(rest[0])
+            value = read_setting(rest[0])
+            if value is not None:
+                print(value)
+            return 0
+        if action == "--unset" and len(rest) == 1:
+            unset_setting(rest[0])
+            return 0
+    except ValueError as error:
+        print(f"lint_changed.py: {error}", file=sys.stderr)
+        return 1
+    print("lint_changed.py: usage: --set KEY VALUE | --get KEY | --unset KEY", file=sys.stderr)
+    return 1
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] and sys.argv[1] in ("--set", "--get", "--unset"):
+        sys.exit(run_settings_cli(sys.argv[1:]))
     sys.exit(main())
