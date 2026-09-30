@@ -168,7 +168,7 @@ All enabled by default. Set to `"off"` to disable.
 
 - **Zero tolerance** by default (configurable thresholds)
 - **Fail fast**: bash syntax failure skips remaining checks for that file
-- **4-space indentation**: bashate enforces this for shell scripts
+- **4-space indentation**: enforced by both `bashate` and `shfmt -i 4`. The `-i 4` is required — shfmt's default is tab indents, which `bashate` rejects as E002, so without it the two checks demand opposite things and no shell file can pass both.
 - **Bashate E006**: excluded (line length)
 
 ## Deployment

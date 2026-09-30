@@ -301,12 +301,25 @@ else
         fi
 
         # shfmt (format check only)
+        #
+        # -i 4 is load-bearing, not cosmetic. shfmt's default is 0, meaning TAB indents, while
+        # bashate above emits E002 "Tab indents" and E003 "Indent not multiple of 4" — so with the
+        # default the two checks demanded opposite things and NO shell file could pass both. Four
+        # spaces is the documented project policy (see Policies in README.md) and what three of the
+        # four shell files here already use, and bashate's rule cannot be configured to accept tabs,
+        # so shfmt is the side that gets configured.
+        #
+        # The cost of not doing this was real: claude-plugin/scripts/lint-changed.sh was written with
+        # no indented lines at all, purely so it could satisfy both checks.
+        #
+        # Passing a printer flag also makes shfmt ignore any .editorconfig it finds, which keeps this
+        # verdict identical inside the container and on a contributor's machine.
         if [ "$SHFMT_ENABLED" = "off" ]; then
             skipped shfmt
             warn "shfmt (disabled)"
         elif command -v shfmt >/dev/null 2>&1; then
             ran shfmt
-            if shfmt -d "$f" | grep -q .; then
+            if shfmt -i 4 -d "$f" | grep -q .; then
                 check_failures[shfmt]=$(( check_failures[shfmt] + 1 ))
                 fail "shfmt (formatting required)"
             else
