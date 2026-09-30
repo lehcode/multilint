@@ -53,3 +53,12 @@ The pi-router script cannot be copied: its ShellCheck stage never fails (`|| ech
 | `shellcheck -S style`, `bashate -i E006`, `shfmt -i 4 -d` | clean |
 | `lint.sh` on script and on `lint_changed.py` | all checks passed |
 | `pre-commit run --all-files` | markdownlint fails (pre-existing, `--fix` rewrites CHANGELOG.md; reverted); `fail_fast` stops later hooks; gitleaks and quality-benchmark pass when run alone |
+
+## Review
+
+- Commits `beafdaf`, `5e14f9b`: assessed high risk, review granted, 4 lenses approved and acknowledged (lineage `review-b9d3a7446015924e`).
+- Non-blocking follow-ups: vulture stage counts stderr/crash lines as findings instead of `ERR` (still fails closed); stage count duplicated; no automated test for the script.
+
+## Next step
+
+Push and PR are the user's decision.
