@@ -4,9 +4,29 @@
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
+import pytest
+
 LINT_SH = Path(__file__).parent.parent.parent / "lint.sh"
+
+
+@pytest.fixture(autouse=True)
+def _ml_isolated_cwd(monkeypatch):
+    """Run every test in this module from an empty directory.
+
+    lint.sh now resolves .multilint.json as $PWD/.multilint.json first
+    (defect 1 fix). Without this, subprocess.run(...) here would inherit
+    pytest's cwd — the repository root, which has its own .multilint.json —
+    and every test that does not pass cwd= explicitly would silently pick
+    that up instead of the fixture it thinks it is exercising. Tests that
+    specifically exercise $PWD lookup pass cwd= explicitly and are
+    unaffected by this fixture changing the process's cwd underneath them.
+    """
+    with tempfile.TemporaryDirectory() as empty_dir:
+        monkeypatch.chdir(empty_dir)
+        yield
 
 
 class TestJSONOutput:
@@ -101,27 +121,34 @@ class TestJSONOutput:
 
 
 class TestFeatureToggles:
-    """Tests for MULTILINT_* feature toggle environment variables."""
+    """Tests for disabling a check via .multilint.json's checks.<name>.enabled.
+
+    Previously these used MULTILINT_*_CHECK=off environment variables; that
+    control surface is retired (user decision, 2026-09-30 -- environment
+    variables are not a multilint configuration surface). The behavior being
+    tested -- a check can be disabled and reports status "skipped" -- is
+    unchanged; only the control surface moved to .multilint.json.
+    """
 
     def test_black_disabled(self, tmp_dir):
-        """MULTILINT_BLACK_CHECK=off skips black check."""
+        """checks.black.enabled: false skips black check."""
         Path(tmp_dir, "test.py").write_text("x=1+1\n", encoding="utf-8")
+        _write_config(tmp_dir, {"checks": {"black": {"enabled": False}}})
         result = subprocess.run(
             ["bash", str(LINT_SH), tmp_dir],
             capture_output=True,
             text=True,
-            env={**os.environ, "MULTILINT_BLACK_CHECK": "off"},
         )
         assert "black (disabled)" in result.stdout or "black" not in result.stdout
 
     def test_shfmt_disabled(self, tmp_dir):
-        """MULTILINT_SHFMT_CHECK=off skips shfmt check."""
+        """checks.shfmt.enabled: false skips shfmt check."""
         Path(tmp_dir, "test.sh").write_text("#!/usr/bin/env bash\necho hi\n", encoding="utf-8")
+        _write_config(tmp_dir, {"checks": {"shfmt": {"enabled": False}}})
         result = subprocess.run(
             ["bash", str(LINT_SH), tmp_dir],
             capture_output=True,
             text=True,
-            env={**os.environ, "MULTILINT_SHFMT_CHECK": "off"},
         )
         assert "shfmt (disabled)" in result.stdout or "shfmt" not in result.stdout
 
@@ -143,28 +170,32 @@ class TestFeatureToggles:
         assert "shfmt -d" not in source, "a bare `shfmt -d` reintroduces the tab/space contradiction"
 
     def test_bashate_disabled(self, tmp_dir):
-        """MULTILINT_BASHATE_CHECK=off skips bashate check."""
+        """checks.bashate.enabled: false skips bashate check."""
         Path(tmp_dir, "test.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\necho hi\n", encoding="utf-8")
+        _write_config(tmp_dir, {"checks": {"bashate": {"enabled": False}}})
         result = subprocess.run(
             ["bash", str(LINT_SH), tmp_dir],
             capture_output=True,
             text=True,
-            env={**os.environ, "MULTILINT_BASHATE_CHECK": "off"},
         )
         assert "bashate (disabled)" in result.stdout or "bashate" not in result.stdout
 
     def test_all_checks_disabled(self, sample_project_empty):
         """All checks disabled → exit 0."""
+        _write_config(
+            sample_project_empty,
+            {
+                "checks": {
+                    "black": {"enabled": False},
+                    "shfmt": {"enabled": False},
+                    "bashate": {"enabled": False},
+                }
+            },
+        )
         result = subprocess.run(
             ["bash", str(LINT_SH), sample_project_empty],
             capture_output=True,
             text=True,
-            env={
-                **os.environ,
-                "MULTILINT_BLACK_CHECK": "off",
-                "MULTILINT_SHFMT_CHECK": "off",
-                "MULTILINT_BASHATE_CHECK": "off",
-            },
         )
         assert result.returncode == 0
 
@@ -351,12 +382,12 @@ class TestGitleaks:
         assert ".git not found, skipping" not in result.stdout
 
     def test_gitleaks_disabled(self, sample_project_empty):
-        """MULTILINT_GITLEAKS_CHECK=off skips gitleaks."""
+        """checks.gitleaks.enabled: false skips gitleaks."""
+        _write_config(sample_project_empty, {"checks": {"gitleaks": {"enabled": False}}})
         result = subprocess.run(
             ["bash", str(LINT_SH), sample_project_empty],
             capture_output=True,
             text=True,
-            env={**os.environ, "MULTILINT_GITLEAKS_CHECK": "off"},
         )
         assert "gitleaks (disabled)" in result.stdout
 
@@ -411,16 +442,33 @@ ALL_CHECKS = (
 )
 
 
-def _lint_json(target, env=None):
+def _lint_json(target, env=None, cwd=None):
     """Run lint.sh --format json against target and return the parsed document."""
     result = subprocess.run(
         ["bash", str(LINT_SH), str(target), "--format", "json"],
         capture_output=True,
         text=True,
         env={**os.environ, **(env or {})},
+        cwd=cwd,
     )
     assert result.stdout, f"no JSON on stdout; stderr tail: {result.stderr[-500:]}"
     return json.loads(result.stdout)
+
+
+def _lint_text(target, env=None, cwd=None):
+    """Run lint.sh in text mode and return the completed process."""
+    return subprocess.run(
+        ["bash", str(LINT_SH), str(target)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **(env or {})},
+        cwd=cwd,
+    )
+
+
+def _write_config(directory, document):
+    """Write a .multilint.json into directory, JSON-encoding document."""
+    Path(directory, ".multilint.json").write_text(json.dumps(document), encoding="utf-8")
 
 
 class TestJSONContract:
@@ -512,10 +560,11 @@ class TestJSONContract:
     def test_disabled_check_is_skipped_not_passing(self, sample_project):
         """Switching a check off reports skipped, never a silent pass.
 
-        Uses the documented toggle rather than PATH surgery, so the result does
-        not depend on which linters the host has.
+        Uses .multilint.json's checks.black.enabled rather than PATH
+        surgery, so the result does not depend on which linters the host has.
         """
-        data = _lint_json(sample_project, env={"MULTILINT_BLACK_CHECK": "off"})
+        _write_config(sample_project, {"checks": {"black": {"enabled": False}}})
+        data = _lint_json(sample_project)
         assert data["checks"]["black"]["status"] == "skipped"
         assert data["checks"]["black"]["total"] == 0
 
@@ -572,3 +621,127 @@ class TestBrokenToolIsNotAPass:
         assert data["checks"]["markdownlint"]["status"] == "ok"
         assert data["checks"]["markdownlint"]["total"] == 1
         assert data["checks"]["markdownlint"]["failed"] == 0
+
+
+class TestSliceOneEssentials:
+    """Reduced-scope Slice 1 regression coverage.
+
+    Per an explicit user scope reduction during apply, this class covers the
+    defect 1 regression, threshold-gated verdict (pass at/below threshold,
+    fail above it), one configuration-warning case, and -- added by the
+    Phase 1.5 amendment -- that none of the retired MULTILINT_* environment
+    variables influences a config-free run any more. The broader Slice 1
+    test tasks (lookup-order fallback, per-check object resolution, option
+    precedence with argv shims, conflict resolution, the full warnings
+    scenario matrix, hostile values, the single-parse counter, the
+    verdict-consistency matrix, and grouped-toggle independence) are
+    intentionally not implemented here -- see tasks.md, where each dropped
+    task is marked accordingly.
+    """
+
+    def test_defect1_file_target_reads_pwd_config(self, tmp_dir):
+        """Defect 1 regression: a single-file target (the plugin's
+        invocation shape) must resolve $PWD/.multilint.json, not
+        "$TARGET_DIR/.multilint.json" -- TARGET_DIR is a file here, so the
+        old code's "$TARGET_DIR/.multilint.json" could never exist and every
+        threshold silently read as 0.
+        """
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        _write_config(proj, {"shellcheck": 3})
+        (proj / "a.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\necho hi\n", encoding="utf-8")
+
+        data = _lint_json(proj / "a.sh", cwd=proj)
+
+        assert data["checks"]["shellcheck"]["threshold"] == 3
+
+    def test_threshold_gates_the_run_verdict(self, tmp_dir):
+        """A run passes when failures stay at or below the configured
+        threshold, and fails once they exceed it -- not on the mere
+        presence of a finding, which was the old rule (fail() setting
+        EXIT_CODE=1 as a side effect regardless of any threshold).
+        """
+        # Fails flake8's E741 exactly once per file and nothing else:
+        # verified empirically against this host's black/pylint/mypy/bandit,
+        # all of which pass this content cleanly.
+        flake8_only_failure = "l = 1\nprint(l)\n"
+
+        at_threshold = Path(tmp_dir) / "at_threshold"
+        at_threshold.mkdir()
+        _write_config(at_threshold, {"flake8": 2})
+        (at_threshold / "a.py").write_text(flake8_only_failure, encoding="utf-8")
+        (at_threshold / "b.py").write_text(flake8_only_failure, encoding="utf-8")
+
+        data = _lint_json(at_threshold)
+        assert data["checks"]["flake8"]["failed"] == 2
+        assert data["checks"]["flake8"]["threshold_exceeded"] is False
+        assert data["return_code"] == 0
+        assert _lint_text(at_threshold).returncode == 0
+
+        above_threshold = Path(tmp_dir) / "above_threshold"
+        above_threshold.mkdir()
+        _write_config(above_threshold, {"flake8": 1})
+        (above_threshold / "a.py").write_text(flake8_only_failure, encoding="utf-8")
+        (above_threshold / "b.py").write_text(flake8_only_failure, encoding="utf-8")
+
+        data = _lint_json(above_threshold)
+        assert data["checks"]["flake8"]["failed"] == 2
+        assert data["checks"]["flake8"]["threshold_exceeded"] is True
+        assert data["return_code"] == 1
+        assert _lint_text(above_threshold).returncode == 1
+
+    def test_malformed_json_warns_instead_of_silently_defaulting(self, tmp_dir):
+        """A malformed .multilint.json must produce a visible warning and
+        fall back to defaults, not silently resolve every threshold to 0
+        with no indication anything was wrong.
+        """
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        Path(proj, ".multilint.json").write_text("{ invalid json }", encoding="utf-8")
+        (proj / "test.sh").write_text("#!/usr/bin/env bash\necho hi\n", encoding="utf-8")
+
+        data = _lint_json(proj)
+        assert data["warnings"], "malformed JSON must surface a warning, not silently default"
+        assert data["checks"]["shellcheck"]["threshold"] == 0
+
+        result = _lint_text(proj)
+        assert "multilint: config warning:" in result.stderr
+
+    def test_no_env_influence_on_config_free_project(self, tmp_dir):
+        """No MULTILINT_* environment variable may influence a config-free
+        run any more -- environment variables are not a multilint
+        configuration surface (user decision, 2026-09-30).
+
+        Sets every one of the thirteen retired variables to a value that
+        would have changed the old (25ad4c0) behavior -- every toggle to
+        "off", the four options to non-default values -- runs a project with
+        no .multilint.json, and asserts the resolved checks are identical to
+        a run with none of them set. security_secrets and
+        security_dangerous_patterns are grep-based, so this holds regardless
+        of which linters the host has installed.
+        """
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        (proj / "a.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\necho hi\n", encoding="utf-8")
+        (proj / "a.py").write_text("def greet(name: str) -> str:\n    return f'Hello, {name}!'\n", encoding="utf-8")
+
+        baseline = _lint_json(proj)
+
+        disruptive_env = {
+            "MULTILINT_BLACK_CHECK": "off",
+            "MULTILINT_SHFMT_CHECK": "off",
+            "MULTILINT_BASHATE_CHECK": "off",
+            "MULTILINT_MYPY_CHECK": "off",
+            "MULTILINT_BANDIT_CHECK": "off",
+            "MULTILINT_SECURITY_CHECK": "off",
+            "MULTILINT_GITLEAKS_CHECK": "off",
+            "MULTILINT_TOML_CHECK": "off",
+            "MULTILINT_YAML_JSON_CHECK": "off",
+            "MULTILINT_BANDIT_SEVERITY": "-l",
+            "MULTILINT_GITLEAKS_DEPTH": "all",
+            "MULTILINT_GITLEAKS_CONFIG": str(Path(tmp_dir) / "unused.toml"),
+            "MULTILINT_MYPY_CACHE_DIR": str(Path(tmp_dir) / "custom-mypy-cache"),
+        }
+        overridden = _lint_json(proj, env=disruptive_env)
+
+        assert overridden["checks"] == baseline["checks"], "a retired MULTILINT_* variable still has an effect"
