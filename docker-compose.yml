@@ -13,9 +13,14 @@
 # projects it was started with. Adding a project meant recreating the container and killing every
 # other agent's in-flight lint. That is the limitation the per-invocation model exists to remove.
 #
-# Mounts are now env-driven with no default, so this file is portable:
+# Mounts are now env-driven, defaulting to the directory you invoke compose from:
 #
+#   cd /path/to/project && docker compose -f <this file> up -d
 #   MULTILINT_WORKSPACE=/path/to/project docker compose up -d
+#
+# It must keep a default. As `${MULTILINT_WORKSPACE:?...}` it was mandatory for `down`, `ps`, `logs`
+# and `config` too, because compose interpolates the whole file before dispatching any subcommand —
+# so a started container could not be stopped through compose.
 #
 # ALLOWED_ROOTS defaults to the mount target rather than being hardcoded. It is the path-injection
 # allowlist server.py enforces; leaving it unset makes the API accept any absolute path inside the
@@ -42,7 +47,7 @@ services:
       - "127.0.0.1:8592:8592"
     volumes:
       # Read-only: every check is check-only, nothing is auto-fixed.
-      - ${MULTILINT_WORKSPACE:?set MULTILINT_WORKSPACE to the project directory to lint}:${MULTILINT_CONTAINER_TARGET:-/workspace}:ro
+      - ${MULTILINT_WORKSPACE:-$PWD}:${MULTILINT_CONTAINER_TARGET:-/workspace}:ro
     restart: unless-stopped
     deploy:
       resources:

@@ -125,6 +125,23 @@ class TestFeatureToggles:
         )
         assert "shfmt (disabled)" in result.stdout or "shfmt" not in result.stdout
 
+    def test_shfmt_indent_agrees_with_bashate(self):
+        """shfmt must be given -i 4, or it contradicts bashate and nothing can pass both.
+
+        shfmt's default indent is 0, meaning TAB indents, while bashate emits E002 "Tab indents"
+        and E003 "Indent not multiple of 4". With the default, every shell file in this repository
+        failed exactly one of the two checks and no file could satisfy both. That cost real work:
+        claude-plugin/scripts/lint-changed.sh was written with no indented lines at all purely to
+        pass both.
+
+        Asserted on the source text rather than by running the tools, because shfmt is not
+        installed on the CI runner — a behavioural test would silently skip there, which is
+        precisely where this regression would land unnoticed.
+        """
+        source = LINT_SH.read_text(encoding="utf-8")
+        assert "shfmt -i 4 -d" in source, "shfmt lost its -i 4 and now contradicts bashate"
+        assert "shfmt -d" not in source, "a bare `shfmt -d` reintroduces the tab/space contradiction"
+
     def test_bashate_disabled(self, tmp_dir):
         """MULTILINT_BASHATE_CHECK=off skips bashate check."""
         Path(tmp_dir, "test.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\necho hi\n", encoding="utf-8")
