@@ -815,3 +815,18 @@ class TestSliceThreeEssentials:
         assert (
             Path(proj / "b.py").read_text(encoding="utf-8") == unformatted
         ), "the --check harness flag must survive args: [] -- black must never rewrite the file"
+
+    def test_missing_gitleaks_config_is_reported(self, tmp_dir):
+        """A configured gitleaks.config that does not exist is a config warning, not a silent fallback
+        to the built-in rules; a relative path resolves against the .multilint.json directory."""
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        _write_config(proj, {"gitleaks": {"config": "missing.toml"}})
+        (proj / "a.sh").write_text("#!/bin/bash\necho ok\n", encoding="utf-8")
+
+        data = _lint_json(proj)
+        assert any(str(proj / "missing.toml") in w for w in data["warnings"]), data["warnings"]
+
+        (proj / "missing.toml").write_text("", encoding="utf-8")
+        data = _lint_json(proj, cwd=tmp_dir)
+        assert not any("gitleaks.config" in w for w in data["warnings"]), data["warnings"]

@@ -111,8 +111,14 @@ def state_dir() -> Path:
     standard, not a multilint-specific control. MULTILINT_STATE_DIR is retired with no replacement.
     """
     xdg = os.environ.get("XDG_STATE_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".local" / "state"
+    # The XDG spec makes a relative value invalid, to be ignored. Honouring it would place the
+    # database relative to whatever directory the hook runs in, and as_uri() rejects it outright.
+    base = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "state"
     return base / "multilint"
+
+
+# Settings-read failures collected during this run, surfaced with the lint.sh config warnings.
+SETTING_WARNINGS: list[str] = []
 
 
 def has_control_char(value: str) -> bool:
@@ -127,20 +133,31 @@ def check_setting_key(key: str) -> None:
 
 
 def read_setting(key: str) -> str | None:
-    """Value stored for key, or None on a missing db/table/row or any sqlite3.Error/OSError."""
+    """Value stored for key, or None when nothing is set or the database cannot be read.
+
+    A missing database, table or row is the ordinary "nothing set" answer and stays silent. Any
+    other failure (still locked after the timeout, corrupt file, unreadable) also falls back to the
+    built-in default, but says so on stderr and in SETTING_WARNINGS: silently linting with the
+    default image would report on a different toolchain than the one configured.
+    """
+    database = state_dir() / "changes.db"
+    if not database.exists():
+        return None
     try:
         # Read-only URI: a plain connect() would create an empty changes.db as a side effect of a
-        # lookup. mode=ro fails on a missing file instead, which is the "nothing set" answer.
-        uri = (state_dir() / "changes.db").as_uri() + "?mode=ro"
-        connection = sqlite3.connect(uri, uri=True, timeout=10)
-    except (OSError, sqlite3.Error):
+        # lookup.
+        connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=10)
+        try:
+            row = connection.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error) as error:
+        if "no such table" in str(error):
+            return None
+        message = f"could not read the {key!r} setting from {database}, using the default: {error}"
+        SETTING_WARNINGS.append(message)
+        print(f"lint_changed.py: {message}", file=sys.stderr)
         return None
-    try:
-        row = connection.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        connection.close()
     return row[0] if row is not None else None
 
 
@@ -687,6 +704,7 @@ def main() -> int:
         return 0
 
     findings, skipped, warnings, failed = summarize_results(results)
+    warnings = SETTING_WARNINGS + warnings
     notices = build_notices(relative, findings, skipped, warnings, failed)
     if not notices:
         return 0
