@@ -129,7 +129,7 @@ class LintHandler(BaseHTTPRequestHandler):
         else:
             self._respond(404, {"error": "not found"})
 
-    def log_request(self, *args) -> None:
+    def log_request(self, *_args) -> None:
         pass  # suppress default logging
 
 

@@ -188,7 +188,7 @@ class TestResultParsing:
             stdout = f"{hook.FILE_MARKER}a.py\nthis is not json\n"
             stderr = ""
 
-        monkeypatch.setattr(hook.subprocess, "run", lambda *a, **k: _Proc())
+        monkeypatch.setattr(hook.subprocess, "run", lambda *_a, **_k: _Proc())
         assert hook.run_lint(Path("/p"), ["a.py"]) == []
 
     def test_docker_absent_is_a_silent_no_op(self, hook, monkeypatch):

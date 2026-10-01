@@ -58,3 +58,16 @@ repos:
       - id: gitleaks
         stages: [pre-push]
         args: ['dir', '.', '--verbose', '--redact', '--config', '.gitleaks.toml']
+
+  # Code Quality Benchmark: dead code, complexity, import contracts (pre-commit and pre-push)
+  - repo: local
+    hooks:
+      - id: quality-benchmark
+        name: Code Quality Benchmark
+        entry: scripts/quality-benchmark.sh
+        language: python
+        additional_dependencies: [vulture==2.16, xenon==0.9.3, import-linter==2.15]
+        stages: [pre-commit, pre-push]
+        pass_filenames: false
+        always_run: true
+        verbose: true

@@ -1,0 +1,22 @@
+# import-linter contracts for the test suites.
+# The root is `tests` because it is the repo's only package: server.py and mcp_server.py are
+# single-file modules, and import-linter rejects modules as root packages.
+
+[importlinter]
+root_package = tests
+
+[importlinter:contract:test-suites-independent]
+name = Unit and integration suites are independent
+type = independence
+modules =
+    tests.unit
+    tests.integration
+
+[importlinter:contract:fixtures-are-data]
+name = Test suites do not import fixture inputs
+type = forbidden
+source_modules =
+    tests.unit
+    tests.integration
+forbidden_modules =
+    tests.fixtures
