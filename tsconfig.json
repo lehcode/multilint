@@ -8,6 +8,7 @@
     "emitDeclarationOnly": true,
     "outDir": "dist",
     "strict": true,
+    "verbatimModuleSyntax": true,
     "skipLibCheck": true
   },
   "include": ["src"]
