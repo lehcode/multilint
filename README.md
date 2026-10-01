@@ -114,7 +114,7 @@ Any tool failure increments the fail counter; benchmark fails if ≥1/3 tools fa
 
 **YAML / JSON** — **prettier --check** (error log level).
 
-**TOML** — **toml-sort --check --sort-keys**.
+**TOML** — **toml-sort --check --sort-table-keys**.
 
 **Security** (grep-based):
 
@@ -208,7 +208,7 @@ and **policy flags** (the tool's opinionated defaults, replaced wholesale by
 | `bandit` | `-q <bandit.severity> -f custom --msg-template ...` | empty — severity is the `bandit.severity` option, not `args` |
 | `markdownlint` | none | `-c .markdownlint.json` when that file exists in `$PWD`, else empty |
 | `yaml_prettier` / `json_prettier` | `--check --log-level error` | empty |
-| `toml_sort` | `--check` | `--sort-keys` |
+| `toml_sort` | `--check` | `--sort-table-keys` |
 | `security_secrets` / `security_dangerous_patterns` | grep pattern | n/a — `args` unsupported |
 | `gitleaks` | `detect`, `--source`/`--no-git --source`, config/depth flags, `--verbose --no-color --no-banner` | empty |
 
@@ -404,7 +404,6 @@ The OpenCode plugin reads no environment variables. It runs the image named by t
 
 - Plugin only hooks into tool executions; not triggered by file watchers or external edits
 - Plugin is non-blocking — failures do not prevent the save from completing
-- TOML check has a known CLI bug (`--check --sort-keys` flags conflict in `lint.sh` line 471)
 
 ## Troubleshooting
 

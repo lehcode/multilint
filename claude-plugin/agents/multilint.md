@@ -70,7 +70,7 @@ harness flags only. `gitleaks`, `bandit`, and `mypy` also accept an options obje
 | `bandit` | `-q <bandit.severity> -f custom --msg-template ...` | empty — severity is `bandit.severity`, not `args` |
 | `markdownlint` | none | `-c .markdownlint.json` when that file exists in `$PWD`, else empty |
 | `yaml_prettier` / `json_prettier` | `--check --log-level error` | empty |
-| `toml_sort` | `--check` | `--sort-keys` |
+| `toml_sort` | `--check` | `--sort-table-keys` |
 | `security_secrets` / `security_dangerous_patterns` | grep pattern | n/a — `args` unsupported |
 | `gitleaks` | `detect`, `--source`/`--no-git --source`, config/depth flags, `--verbose --no-color --no-banner` | empty |
 

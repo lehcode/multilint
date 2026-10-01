@@ -218,7 +218,7 @@ else
 fi
 yaml_prettier_args=()
 json_prettier_args=()
-toml_sort_args=(--sort-keys)
+toml_sort_args=(--sort-table-keys)
 gitleaks_args=()
 
 # 2. JSON layer. ml_line_allowed is the line filter: every line the loader
@@ -552,10 +552,21 @@ fi
 ml_msg_seq=0
 # record_output <check> <file> <raw output>; <file> is "" for repo-wide tools.
 record_output() {
-    [ -n "$ML_MSG_DIR" ] || return 0
-    ml_msg_seq=$(( ml_msg_seq + 1 ))
-    printf '%s' "$2" >"$ML_MSG_DIR/$(printf '%04d' "$ml_msg_seq").$1.file"
-    printf '%s\n' "$3" >"$ML_MSG_DIR/$(printf '%04d' "$ml_msg_seq").$1.out"
+    local base
+    if [ -n "$ML_MSG_DIR" ]; then
+        ml_msg_seq=$(( ml_msg_seq + 1 ))
+        base="$ML_MSG_DIR/$(printf '%04d' "$ml_msg_seq").$1"
+        if printf '%s' "$2" >"$base.file" && printf '%s\n' "$3" >"$base.out"; then
+            return 0
+        fi
+    fi
+    # Do not drop findings silently: the check still fails, only its detail is lost.
+    if [ "${ml_record_warned:-0}" -eq 0 ]; then
+        ml_record_warned=1
+        ml_warnings+=("could not record tool output; findings detail may be missing from the JSON report")
+        warn "could not record tool output; findings detail may be missing"
+    fi
+    return 0
 }
 
 # True unless "<check>_enabled" has been set to "off" (built-in default, then
@@ -669,8 +680,14 @@ else
             warn "shfmt (disabled)"
         elif command -v shfmt >/dev/null 2>&1; then
             ran shfmt
-            if shfmt "${shfmt_args[@]+"${shfmt_args[@]}"}" -d "$f" | grep -q .; then
-                record_output shfmt "$f" ""
+            # shfmt -d exits 1 on a diff; capture output and status explicitly so pipefail cannot
+            # turn that into a pass. rc>1 is a genuine shfmt error, also not a pass.
+            set +e
+            shfmt_output="$(shfmt "${shfmt_args[@]+"${shfmt_args[@]}"}" -d "$f" 2>&1)"
+            shfmt_rc=$?
+            set -e
+            if [ "$shfmt_rc" -ne 0 ] || [ -n "$shfmt_output" ]; then
+                record_output shfmt "$f" "$shfmt_output"
                 check_failures[shfmt]=$(( check_failures[shfmt] + 1 ))
                 fail "shfmt (formatting required)"
             else
@@ -770,7 +787,9 @@ else
         elif command -v pylint >/dev/null 2>&1; then
             ran pylint
             set +e
-            pb_pylint="$(pylint --output-format=text "${pylint_args[@]+"${pylint_args[@]}"}" "$f" 2>&1)"
+            # The container user has no writable home, so pylint's default cache dir (/.cache/pylint)
+            # fails with a warning that would land in the findings; point it at the temp dir instead.
+            pb_pylint="$(PYLINTHOME="${PYLINTHOME:-${ML_MSG_DIR:-/tmp}/.pylint}" pylint --output-format=text "${pylint_args[@]+"${pylint_args[@]}"}" "$f" 2>&1)"
             pb_pylint_rc=$?
             set -e
             if [ "$pb_pylint_rc" -eq 0 ]; then
@@ -1038,7 +1057,7 @@ else
             echo "  📝 $f"
 
             # Harness flag --check is always kept; policy flags come from
-            # toml_sort_args (default: --sort-keys).
+            # toml_sort_args (default: --sort-table-keys).
             ran toml_sort
             set +e
             toml_output="$(toml-sort --check "${toml_sort_args[@]+"${toml_sort_args[@]}"}" "$f" 2>&1)"
@@ -1096,6 +1115,7 @@ else
         [ "$(basename "$f")" = "lint.sh" ] && continue
         ran security_secrets
         set +e
+        secret_rc=0
         secret_output=$(grep -Eni \
             "(password|passwd|secret|api_key|apikey|token|auth_token)[[:space:]]*=[[:space:]]*[\"'][^\"']+[\"']" \
             "$f" 2>&1) || secret_rc=$?
@@ -1123,6 +1143,7 @@ else
         esac
         ran security_secrets
         set +e
+        py_secret_rc=0
         py_secret_output=$(grep -Eni \
             "(password|passwd|secret|api_key|apikey|token|auth_token)[[:space:]]*=[[:space:]]*[\"'][^\"']+[\"']" \
             "$f" 2>&1) || py_secret_rc=$?
@@ -1149,6 +1170,7 @@ else
         [ "$(basename "$f")" = "lint.sh" ] && continue
         ran security_dangerous_patterns
         set +e
+        dangerous_rc=0
         dangerous_output=$(grep -Eni \
             'chmod[[:space:]]+777|curl[[:space:]].*[[:space:]]*\|[[:space:]]*.*bash|eval[[:space:]]+.*\$' \
             "$f" 2>&1) || dangerous_rc=$?
@@ -1436,6 +1458,7 @@ for name in os.environ.get("ML_CHECK_ORDER", "").split(","):
 # dropped, except the decorative lines listed in SKIP_LINES. "symbol" is an
 # additive extra for tools that name a rule twice (pylint, markdownlint).
 MAX_FINDINGS = 50
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 FORMAT_MESSAGE = "formatting required"
 PARSERS = {
     "bash_syntax": r"^(?P<file>.+?): line (?P<line>\d+): (?P<message>.*)$",
@@ -1458,6 +1481,8 @@ FIXED = {
 SKIP_LINES = {
     "pylint": r"^(\*+ Module .*|-{5,}|Your code has been rated .*)$",
     "bashate": r"^\d+ bashate error\(s\) found$",
+    # Raw-output fallback only: never echo the secret value or the matched line into a finding.
+    "gitleaks": r"^(Secret|Match|Finding):",
 }
 # Formatters: one finding per file, no rule. Output lines that mention an error
 # (a parse failure, a bad flag) are reported as findings of their own instead.
@@ -1487,7 +1512,7 @@ def make_finding(file, line, rule, message, symbol=None):
 def parse_gitleaks(text):
     """gitleaks --verbose prints one "Key: value" block per leak; the secret itself is never copied."""
     found, current = [], None
-    for line in text.splitlines():
+    for line in ANSI.sub("", text).splitlines():
         key, _, value = line.partition(":")
         key, value = key.strip(), value.strip()
         if key == "Finding":

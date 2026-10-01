@@ -857,3 +857,42 @@ class TestFindings:
     def test_formatter_fix_hint_is_the_exact_command(self, tmp_path):
         data = self._lint_bad_python(tmp_path)
         assert data["checks"]["black"]["fix"] == "formatting only; run: black --line-length=120 a.py"
+
+
+class TestSilentMissRegressions:
+    """One regression test each for checks that could never fail."""
+
+    @pytest.mark.skipif(shutil.which("shfmt") is None, reason="shfmt not installed")
+    def test_misformatted_shell_file_fails_shfmt(self, tmp_dir):
+        """shfmt -d exits 1 on a diff; pipefail used to turn that into a pass."""
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        (proj / "bad.sh").write_text("#!/bin/bash\nif [ 1 ]; then\necho   hi\nfi\n")
+
+        data = _lint_json(proj)
+
+        assert data["checks"]["shfmt"]["status"] == "failed"
+        assert data["checks"]["shfmt"]["failed"] == 1
+
+    def test_secret_in_a_later_shell_file_is_still_found(self, tmp_dir):
+        """The grep exit status used to carry over from a clean file and mask every later match."""
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        for index in range(4):
+            (proj / f"clean{index}.sh").write_text("#!/bin/bash\necho ok\n")
+            (proj / f"leak{index}.sh").write_text('#!/bin/bash\npassword="hunter2abc"\n')
+
+        data = _lint_json(proj)
+
+        assert data["checks"]["security_secrets"]["failed"] == 4
+
+    @pytest.mark.skipif(shutil.which("toml-sort") is None, reason="toml-sort not installed")
+    def test_sorted_toml_passes_with_default_args(self, tmp_dir):
+        """The default toml_sort args used to be a flag toml-sort rejects, failing every file."""
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        (proj / "ok.toml").write_text("a = 1\nb = 2\n\n[t]\ny = 2\nz = 1\n")
+
+        data = _lint_json(proj)
+
+        assert data["checks"]["toml_sort"]["status"] == "ok"
