@@ -372,6 +372,29 @@ def open_state() -> sqlite3.Connection | None:
     return connection
 
 
+def touch_folder(connection: sqlite3.Connection, key: str, stamp: str) -> None:
+    """Bump last_used_at for a cached folder; a failed write costs nothing, so it is swallowed."""
+    try:
+        connection.execute("UPDATE folders SET last_used_at = ? WHERE folder = ?", (stamp, key))
+        connection.commit()
+    except sqlite3.Error:
+        pass
+
+
+def store_folder(connection: sqlite3.Connection, key: str, resolved: Path | None, stamp: str) -> None:
+    """Upsert the resolved root for a folder; a failed write only means the next call re-resolves."""
+    try:
+        connection.execute(
+            "INSERT INTO folders (folder, git_root, resolved_at, last_used_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(folder) DO UPDATE SET git_root=excluded.git_root, "
+            "resolved_at=excluded.resolved_at, last_used_at=excluded.last_used_at",
+            (key, str(resolved) if resolved else None, stamp, stamp),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        pass
+
+
 def cached_git_root(connection: sqlite3.Connection | None, folder: Path) -> tuple[Path | None, bool]:
     """Repository root for a folder, from cache when the cache is still true.
 
@@ -394,31 +417,14 @@ def cached_git_root(connection: sqlite3.Connection | None, folder: Path) -> tupl
     if row is not None:
         recorded = row[0]
         if recorded and (Path(recorded) / ".git").exists():
-            try:
-                connection.execute("UPDATE folders SET last_used_at = ? WHERE folder = ?", (stamp, key))
-                connection.commit()
-            except sqlite3.Error:
-                pass
+            touch_folder(connection, key, stamp)
             return Path(recorded), True
         if recorded is None and find_git_root(folder) is None:
-            try:
-                connection.execute("UPDATE folders SET last_used_at = ? WHERE folder = ?", (stamp, key))
-                connection.commit()
-            except sqlite3.Error:
-                pass
+            touch_folder(connection, key, stamp)
             return None, True
 
     resolved = find_git_root(folder)
-    try:
-        connection.execute(
-            "INSERT INTO folders (folder, git_root, resolved_at, last_used_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(folder) DO UPDATE SET git_root=excluded.git_root, "
-            "resolved_at=excluded.resolved_at, last_used_at=excluded.last_used_at",
-            (key, str(resolved) if resolved else None, stamp, stamp),
-        )
-        connection.commit()
-    except sqlite3.Error:
-        pass
+    store_folder(connection, key, resolved, stamp)
     return resolved, False
 
 
@@ -566,26 +572,23 @@ def config_warnings(document: dict) -> list[str]:
     return [w for w in warnings if isinstance(w, str)]
 
 
-def main() -> int:
-    """Read the hook payload, lint what changed, and report failures on stdout."""
-    try:
-        payload = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, ValueError):
-        return 0
-    if not isinstance(payload, dict):
-        return 0
-
+def resolve_edited_file(payload: dict) -> Path | None:
+    """Absolute path of the lintable file the payload edited, or None when there is nothing to lint."""
     edited = edited_file_from_payload(payload)
     if edited is None or edited.suffix not in LINTABLE_SUFFIXES:
-        return 0
+        return None
 
     edited = edited.expanduser()
     if not edited.is_absolute():
         edited = (Path(payload.get("cwd") or ".") / edited).resolve()
 
     if not edited.is_file():
-        return 0
+        return None
+    return edited
 
+
+def changed_scope_root(edited: Path) -> Path | None:
+    """Scope root to lint in, or None when the file's content is the same as last time."""
     # One connection for the whole invocation: the git-root cache and the digest record both use it,
     # and opening it twice would be two migrations and two locks.
     state = open_state()
@@ -601,21 +604,15 @@ def main() -> int:
         if not record_and_check(state, edited, git_root):
             # Same bytes as last time. Re-linting would produce the same verdict the user has already
             # seen, so saying nothing is the correct answer rather than a missed check.
-            return 0
+            return None
     finally:
         if state is not None:
             state.close()
+    return scope_root
 
-    # Relative to the scope root because that is the container's working directory.
-    try:
-        relative = edited.resolve().relative_to(scope_root.resolve()).as_posix()
-    except (ValueError, OSError):
-        return 0
 
-    results = run_lint(scope_root, [relative])
-    if not results:
-        return 0
-
+def summarize_results(results: list) -> tuple[list[str], set[str], list[str], int]:
+    """Fold per-file lint results into (findings, skipped checks, config warnings, failed count)."""
     findings: list[str] = []
     skipped: set[str] = set()
     warnings: list[str] = []
@@ -632,7 +629,11 @@ def main() -> int:
             lines = failing_checks(document)
         if lines:
             findings.append(f"{name}:\n" + "\n".join(lines))
+    return findings, skipped, warnings, failed
 
+
+def build_notices(relative: str, findings: list[str], skipped: set[str], warnings: list[str], failed: int) -> list[str]:
+    """The user-facing notices, one per kind of problem; empty when there is nothing to report."""
     notices: list[str] = []
     if failed:
         context = "\n\n".join(findings)[:MAX_CONTEXT_CHARS]
@@ -649,7 +650,44 @@ def main() -> int:
         # Independent of return_code: a malformed .multilint.json is worth surfacing even when the
         # run otherwise passed, the same way defect 1 (a silently-ignored threshold) went unnoticed.
         notices.append("multilint: config warning: " + "; ".join(warnings))
+    return notices
 
+
+def read_payload() -> dict | None:
+    """The hook payload from stdin, or None when it is not a JSON object."""
+    try:
+        payload = json.loads(sys.stdin.read())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def main() -> int:
+    """Read the hook payload, lint what changed, and report failures on stdout."""
+    payload = read_payload()
+    if payload is None:
+        return 0
+
+    edited = resolve_edited_file(payload)
+    if edited is None:
+        return 0
+
+    scope_root = changed_scope_root(edited)
+    if scope_root is None:
+        return 0
+
+    # Relative to the scope root because that is the container's working directory.
+    try:
+        relative = edited.resolve().relative_to(scope_root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return 0
+
+    results = run_lint(scope_root, [relative])
+    if not results:
+        return 0
+
+    findings, skipped, warnings, failed = summarize_results(results)
+    notices = build_notices(relative, findings, skipped, warnings, failed)
     if not notices:
         return 0
 
