@@ -102,6 +102,8 @@ STRUCTURALLY_SKIPPED: frozenset[str] = frozenset()
 # Cap on the text handed back to Claude. The full lint output of a failing directory runs to several
 # kilobytes; only the failing lines are worth the context.
 MAX_CONTEXT_CHARS = 4000
+# The message lint.sh gives a formatter finding; the check's "fix" line already says it, so it is not repeated.
+FORMAT_ONLY_MESSAGE = "formatting required"
 
 
 def state_dir() -> Path:
@@ -577,6 +579,60 @@ def failing_lines(stdout: str) -> list[str]:
     return [line.rstrip() for line in stdout.splitlines() if "✗" in line or "⚠" in line]
 
 
+def finding_location(item: dict) -> str:
+    """The "file:line" of a finding, or just "file" when the tool gave no line."""
+    file = item.get("file") or ""
+    return f"{file}:{item['line']}" if item.get("line") is not None and file else file
+
+
+def finding_line(item: dict) -> str | None:
+    """One notice line for a finding; None for a formatter's bare "formatting required"."""
+    if not isinstance(item, dict) or item.get("message") == FORMAT_ONLY_MESSAGE:
+        return None
+    parts = [item.get("rule"), item.get("symbol"), finding_location(item)]
+    return "  " + " ".join(str(part) for part in parts if part) + f"  {item.get('message') or ''}".rstrip()
+
+
+def check_block(name: str, check: dict) -> str:
+    """The notice block of one failed check: its fix line, then one line per finding."""
+    fix = check.get("fix")
+    lines = [f"{name} — {fix}" if isinstance(fix, str) and fix else name]
+    lines.extend(line for line in map(finding_line, check["findings"]) if line)
+    if check.get("findings_truncated"):
+        lines.append("  … more findings omitted")
+    return "\n".join(lines)
+
+
+def finding_blocks(document: dict) -> tuple[list[str], list[str]]:
+    """(failed check names, notice blocks) built from the "findings"/"fix" fields.
+
+    Both are empty for a document from an older image, whose checks carry counts only, so the caller can
+    fall back to the marker lines.
+    """
+    names: list[str] = []
+    blocks: list[str] = []
+    for name, check in (document.get("checks") or {}).items():
+        if isinstance(check, dict) and check.get("status") == "failed" and "findings" in check:
+            names.append(name)
+            blocks.append(check_block(name, check))
+    return names, blocks
+
+
+def failed_names(results: list) -> list[str]:
+    """Failed check names across every result, in lint.sh's check order, first appearance wins."""
+    return list(dict.fromkeys(n for _file, document, _detail in results for n in finding_blocks(document)[0]))
+
+
+def violated_rules(results: list) -> list[str]:
+    """Sorted unique rule IDs lint.sh reported across every result."""
+    rules: set[str] = set()
+    for _name, document, _detail in results:
+        listed = (document.get("summary") or {}).get("rules_violated")
+        if isinstance(listed, list):
+            rules.update(r for r in listed if isinstance(r, str))
+    return sorted(rules)
+
+
 def config_warnings(document: dict) -> list[str]:
     """The lint.sh "warnings" field, or [] when the field is missing or malformed.
 
@@ -629,7 +685,11 @@ def changed_scope_root(edited: Path) -> Path | None:
 
 
 def summarize_results(results: list) -> tuple[list[str], set[str], list[str], int]:
-    """Fold per-file lint results into (findings, skipped checks, config warnings, failed count)."""
+    """Fold per-file lint results into (findings, skipped checks, config warnings, failed count).
+
+    A document that carries structured findings contributes its rendered check blocks; one from an older
+    image falls back to the marker lines of the human report.
+    """
     findings: list[str] = []
     skipped: set[str] = set()
     warnings: list[str] = []
@@ -640,6 +700,10 @@ def summarize_results(results: list) -> tuple[list[str], set[str], list[str], in
         if document.get("return_code") == 0:
             continue
         failed += 1
+        _names, blocks = finding_blocks(document)
+        if blocks:
+            findings.append("\n".join(blocks))
+            continue
         lines = failing_lines(detail)
         if not lines:
             # Fall back to the structured counts when the human output carried no marked lines.
@@ -649,10 +713,35 @@ def summarize_results(results: list) -> tuple[list[str], set[str], list[str], in
     return findings, skipped, warnings, failed
 
 
-def build_notices(relative: str, findings: list[str], skipped: set[str], warnings: list[str], failed: int) -> list[str]:
-    """The user-facing notices, one per kind of problem; empty when there is nothing to report."""
+def structured_notice(relative: str, findings: list[str], names: list[str], rules: list[str]) -> str:
+    """Header, findings, Rules footer; only the findings are cut to fit MAX_CONTEXT_CHARS."""
+    header = f"multilint: {relative} failed " + ", ".join(names)
+    footer = ("Rules: " + " ".join(rules)) if rules else ""
+    body = "\n".join(findings)
+    budget = MAX_CONTEXT_CHARS - len(header) - len(footer) - 4
+    if len(body) > budget:
+        body = body[: max(budget - 2, 0)].rsplit("\n", 1)[0] + "\n…"
+    return "\n\n".join(part for part in (header, body, footer) if part)
+
+
+def build_notices(
+    relative: str,
+    findings: list[str],
+    skipped: set[str],
+    warnings: list[str],
+    failed: int,
+    names: list[str] | None = None,
+    rules: list[str] | None = None,
+) -> list[str]:
+    """The user-facing notices, one per kind of problem; empty when there is nothing to report.
+
+    With failing check names the failure notice is the structured one: a header, the findings, then a
+    Rules footer. Only the findings are cut to fit MAX_CONTEXT_CHARS, never the header or the footer.
+    """
     notices: list[str] = []
-    if failed:
+    if failed and names:
+        notices.append(structured_notice(relative, findings, names, rules or []))
+    elif failed:
         context = "\n\n".join(findings)[:MAX_CONTEXT_CHARS]
         if not context:
             context = "multilint reported failing checks but produced no parsable output."
@@ -705,7 +794,9 @@ def main() -> int:
 
     findings, skipped, warnings, failed = summarize_results(results)
     warnings = SETTING_WARNINGS + warnings
-    notices = build_notices(relative, findings, skipped, warnings, failed)
+    notices = build_notices(
+        relative, findings, skipped, warnings, failed, failed_names(results), violated_rules(results)
+    )
     if not notices:
         return 0
 

@@ -60,7 +60,7 @@ harness flags only. `gitleaks`, `bandit`, and `mypy` also accept an options obje
 | Check | Harness flags (always kept) | Default policy flags (`args` replaces these) |
 |---|---|---|
 | `bash_syntax` | `-n` | n/a — `args` unsupported |
-| `shellcheck` | none | `-e SC1091 -e SC2155 -e SC2086 -S style` |
+| `shellcheck` | `-f gcc` (after the policy flags, so findings parse) | `-e SC1091 -e SC2155 -e SC2086 -S style` |
 | `bashate` | none | `-i E006` |
 | `shfmt` | `-d` | `-i 4` |
 | `flake8` | none | `--max-line-length=120 --extend-ignore=E203,E111,E121,E124,BLK100` |
@@ -115,6 +115,15 @@ under `checks`:
 
 `summary.checks_skipped` lists the skipped names, and `summary.checks_run` is the number of checks
 reported.
+
+A failed check also carries `findings` (`[{file, line, rule, message}]`, plus `symbol` for pylint and
+markdownlint; `line`/`rule` are `null` when the tool gives none; capped at 50 with
+`findings_truncated: true`) and `fix`, a one-line hint: for formatters (`black`, `shfmt`,
+`yaml_prettier`, `json_prettier`, `toml_sort`) the exact auto-fix command, otherwise "fix the code"
+plus a docs link per rule for `shellcheck` and `markdownlint`. `summary.rules_violated` lists the
+unique rule IDs across all failed checks. Report the findings and fix hints, not just the check
+names; run a formatter's `fix` command rather than hand-editing. An older image has none of these
+fields, only counts.
 
 **`status: "skipped"` is not a pass.** Report it as unverified. `failed: 0` alone does not mean the
 check ran — that is exactly what `status` exists to disambiguate. A `total` of `0` with `status: "ok"`

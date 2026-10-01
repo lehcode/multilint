@@ -198,7 +198,7 @@ and **policy flags** (the tool's opinionated defaults, replaced wholesale by
 | Check | Harness flags (always passed) | Default policy flags (`args` replaces these) |
 |---|---|---|
 | `bash_syntax` | `-n` | n/a — `args` unsupported |
-| `shellcheck` | none | `-e SC1091 -e SC2155 -e SC2086 -S style` |
+| `shellcheck` | `-f gcc` (after the policy flags, so findings parse) | `-e SC1091 -e SC2155 -e SC2086 -S style` |
 | `bashate` | none | `-i E006` |
 | `shfmt` | `-d` | `-i 4` |
 | `flake8` | none | `--max-line-length=120 --extend-ignore=E203,E111,E121,E124,BLK100` |
@@ -317,6 +317,14 @@ In the typical case both are the same — the repo root. `cwd` matters when the 
 - `json` — structured output on stdout with `summary`, `checks`, `return_code`, and `files` fields
 
 The MCP tools always return structured results regardless of this flag.
+
+**Findings.** In `json` mode every failed check also carries the reason, so a client never has to re-run a linter. All three fields are additive; no existing field changes name, type or position:
+
+- `checks.<name>.findings` — `[{"file", "line", "rule", "message"}]`, one per reported problem, parsed from the tool's own output. `line` and `rule` are `null` when the tool gives none; a line that does not parse is kept with both `null` rather than dropped. pylint and markdownlint findings add a `symbol` (`bad-indentation`, `no-trailing-spaces`). Capped at 50 per check, with `findings_truncated: true` when cut.
+- `checks.<name>.fix` — one-line hint. Formatters (`black`, `shfmt`, `yaml_prettier`, `json_prettier`, `toml_sort`) give the exact auto-fix command with the effective policy flags and one `formatting required` finding per file; `shellcheck` and `markdownlint` append a documentation link per rule; the rest say to fix the code and name the `checks.<name>.args` override.
+- `summary.rules_violated` — sorted unique rule IDs across all failed checks.
+
+Both plugins build their notice from these fields and fall back to the old `✗`/`⚠` marker lines when a document has no `findings` (an older image).
 
 ### Optimization
 
