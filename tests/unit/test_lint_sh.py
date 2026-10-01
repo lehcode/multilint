@@ -2,6 +2,7 @@
 
 # pylint: disable=redefined-outer-name
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -178,7 +179,9 @@ class TestThresholds:
         assert "shellcheck: 1 failures (threshold: 2)" in result.stdout
         assert "bash_syntax: 1 failures (threshold: 0)" in result.stdout
         assert "bashate: 1 failures (threshold: 0)" in result.stdout
-        assert "shfmt: 0 failures (threshold: 0)" in result.stdout
+        # The fixture is misformatted, so shfmt fails wherever it is installed; without it the check is skipped.
+        expected_shfmt = 1 if shutil.which("shfmt") else 0
+        assert f"shfmt: {expected_shfmt} failures (threshold: 0)" in result.stdout
 
     def test_threshold_exceeded(self, sample_project_with_threshold_config):
         """When failures exceed threshold, check is marked with ⚠ and fails."""

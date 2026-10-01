@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/lint-changed.sh\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/multilint.sh\"",
             "timeout": 120,
             "statusMessage": "Linting changed files via multilint..."
           }
