@@ -228,13 +228,13 @@ The Docker image both plugins run and the highest directory the Python hook
 may search for a project root are **not** `.multilint.json` keys — they
 configure the plugin process itself, not a check. They live in a small
 SQLite `settings` table instead, managed through a CLI mode in
-`claude-plugin/scripts/multilint.py`:
+`claude-plugin/scripts/lint_changed.py`:
 
 ```bash
-python3 claude-plugin/scripts/multilint.py --set image local/multilint:dev
-python3 claude-plugin/scripts/multilint.py --get image
-python3 claude-plugin/scripts/multilint.py --unset image
-python3 claude-plugin/scripts/multilint.py --set search_ceiling /home/user/projects
+python3 claude-plugin/scripts/lint_changed.py --set image local/multilint:dev
+python3 claude-plugin/scripts/lint_changed.py --get image
+python3 claude-plugin/scripts/lint_changed.py --unset image
+python3 claude-plugin/scripts/lint_changed.py --set search_ceiling /home/user/projects
 ```
 
 Only `image` and `search_ceiling` are accepted keys; any other key exits
