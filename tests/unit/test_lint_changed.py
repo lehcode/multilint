@@ -1,4 +1,4 @@
-"""Unit tests for the Claude Code hook body, claude-plugin/scripts/lint_changed.py.
+"""Unit tests for the Claude Code hook body, claude-plugin/scripts/multilint.py.
 
 Nothing here starts a container. The argv builder is a pure function precisely so that the
 invocation can be asserted on a machine with no Docker and no image, which is what CI is.
@@ -16,12 +16,12 @@ from pathlib import Path
 
 import pytest
 
-HOOK_PATH = Path(__file__).parent.parent.parent / "claude-plugin" / "scripts" / "lint_changed.py"
+HOOK_PATH = Path(__file__).parent.parent.parent / "claude-plugin" / "scripts" / "multilint.py"
 
 
 def _load_module():
     """Import the hook by path — it is a script next to the plugin, not an installed package."""
-    spec = importlib.util.spec_from_file_location("lint_changed_under_test", HOOK_PATH)
+    spec = importlib.util.spec_from_file_location("multilint_under_test", HOOK_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

@@ -160,7 +160,7 @@ class TestFeatureToggles:
         shfmt's own default indent is 0, meaning TAB indents, while bashate emits E002 "Tab
         indents" and E003 "Indent not multiple of 4". With the default, every shell file in this
         repository failed exactly one of the two checks and no file could satisfy both. That cost
-        real work: claude-plugin/scripts/lint-changed.sh was written with no indented lines at all
+        real work: claude-plugin/scripts/multilint.sh was written with no indented lines at all
         purely to pass both.
 
         Retargeted for slice 3 (S3.7): -i 4 now lives in the shfmt_args default array, REPLACEABLE

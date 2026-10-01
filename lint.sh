@@ -659,7 +659,7 @@ else
         # four shell files here already use, and bashate's rule cannot be configured to accept tabs,
         # so shfmt is the side that gets configured.
         #
-        # The cost of not doing this was real: claude-plugin/scripts/lint-changed.sh was written with
+        # The cost of not doing this was real: claude-plugin/scripts/multilint.sh was written with
         # no indented lines at all, purely so it could satisfy both checks.
         #
         # Passing a printer flag also makes shfmt ignore any .editorconfig it finds, which keeps this
