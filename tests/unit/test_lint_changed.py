@@ -594,6 +594,27 @@ class TestHookSettings:
                 row = connection.execute("SELECT 1 FROM settings WHERE key = ?", ("eslint",)).fetchone()
                 assert row is None
 
+    def test_relative_xdg_state_home_is_ignored(self, hook, tmp_path, monkeypatch):
+        """A relative XDG_STATE_HOME is invalid per the XDG spec; it used to crash the hook."""
+        monkeypatch.setenv("XDG_STATE_HOME", "relative/state")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert hook.state_dir() == tmp_path / ".local" / "state" / "multilint"
+        assert hook.resolve_image() == hook.DEFAULT_IMAGE
+
+    def test_unreadable_database_warns_instead_of_failing_silently(self, tmp_path):
+        """A corrupt (or locked) db falls back to the default but says so; absence stays silent."""
+        (tmp_path / "multilint").mkdir()
+        (tmp_path / "multilint" / "changes.db").write_bytes(b"not a sqlite database" * 100)
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH), "--get", "image"],
+            capture_output=True,
+            text=True,
+            env=self._cli_env(tmp_path),
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""
+        assert "could not read the 'image' setting" in result.stderr
+
     def test_resolvers_default_when_no_row_exists(self, hook, tmp_path, monkeypatch):
         """Absent db/table/row all resolve to the built-in default, not an error."""
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
