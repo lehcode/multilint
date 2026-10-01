@@ -7,7 +7,10 @@ invocation can be asserted on a machine with no Docker and no image, which is wh
 # pylint: disable=redefined-outer-name,protected-access
 import importlib.util
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +30,21 @@ def _load_module():
 @pytest.fixture(scope="module")
 def hook():
     return _load_module()
+
+
+def _set_ceiling(monkeypatch, hook_module, value):
+    """Isolate search_ceiling() without a real settings database.
+
+    MULTILINT_SEARCH_CEILING is retired with no environment replacement, so tests that used to
+    monkeypatch.setenv it now monkeypatch read_setting directly -- the smallest change that does not
+    require a real SQLite file per test. The settings table's own round-trip is covered separately
+    in TestHookSettings.
+    """
+    monkeypatch.setattr(
+        hook_module,
+        "read_setting",
+        lambda key: str(value) if key == "search_ceiling" else None,
+    )
 
 
 class TestDockerArgv:
@@ -113,32 +131,11 @@ class TestDockerArgv:
 
 
 class TestImageResolution:
-    def test_env_overrides_default(self, hook, monkeypatch):
-        monkeypatch.setenv("MULTILINT_IMAGE", "local/build:dev")
-        assert hook.resolve_image() == "local/build:dev"
+    """Image comes from the "image" hook-setting now, not MULTILINT_IMAGE (see TestHookSettings)."""
 
-    def test_default_is_the_published_tag(self, hook, monkeypatch):
-        monkeypatch.delenv("MULTILINT_IMAGE", raising=False)
+    def test_default_is_the_published_tag_when_no_setting(self, hook, monkeypatch):
+        monkeypatch.setattr(hook, "read_setting", lambda key: None)
         assert hook.resolve_image() == hook.DEFAULT_IMAGE
-
-    def test_empty_env_falls_back(self, hook, monkeypatch):
-        """An exported-but-empty variable is a configuration accident, not a request for ''."""
-        monkeypatch.setenv("MULTILINT_IMAGE", "")
-        assert hook.resolve_image() == hook.DEFAULT_IMAGE
-
-
-class TestRetiredConfiguration:
-    """The removed variables are reported rather than silently ignored."""
-
-    def test_detects_retired_variables(self, hook, monkeypatch):
-        monkeypatch.setenv("MULTILINT_URL", "http://localhost:8591/lint")
-        monkeypatch.setenv("MULTILINT_PATH_MAP", "/a:/b")
-        assert hook.retired_env_in_use() == ["MULTILINT_URL", "MULTILINT_PATH_MAP"]
-
-    def test_quiet_when_unset(self, hook, monkeypatch):
-        for name in hook.RETIRED_ENV_VARS:
-            monkeypatch.delenv(name, raising=False)
-        assert hook.retired_env_in_use() == []
 
 
 class TestHTTPPathIsGone:
@@ -294,7 +291,7 @@ class TestGitRootIsBoundedAtHome:
     """
 
     def test_finds_the_repository_containing_the_file(self, hook, tmp_path, monkeypatch):
-        monkeypatch.setenv("MULTILINT_SEARCH_CEILING", str(tmp_path))
+        _set_ceiling(monkeypatch, hook, tmp_path)
         (tmp_path / "repo" / ".git").mkdir(parents=True)
         deep = tmp_path / "repo" / "src" / "pkg"
         deep.mkdir(parents=True)
@@ -306,7 +303,7 @@ class TestGitRootIsBoundedAtHome:
         ceiling = tmp_path / "home"
         inner = ceiling / "loose"
         inner.mkdir(parents=True)
-        monkeypatch.setenv("MULTILINT_SEARCH_CEILING", str(ceiling))
+        _set_ceiling(monkeypatch, hook, ceiling)
         assert hook.find_git_root(inner) is None
 
     def test_path_outside_the_ceiling_is_not_searched(self, hook, tmp_path, monkeypatch):
@@ -315,16 +312,16 @@ class TestGitRootIsBoundedAtHome:
         outside.mkdir(parents=True)
         (outside / ".git").mkdir()
         (tmp_path / "home").mkdir()
-        monkeypatch.setenv("MULTILINT_SEARCH_CEILING", str(tmp_path / "home"))
+        _set_ceiling(monkeypatch, hook, tmp_path / "home")
         assert hook.find_git_root(outside) is None
 
     def test_ceiling_itself_may_be_the_repository(self, hook, tmp_path, monkeypatch):
-        monkeypatch.setenv("MULTILINT_SEARCH_CEILING", str(tmp_path))
+        _set_ceiling(monkeypatch, hook, tmp_path)
         (tmp_path / ".git").mkdir()
         assert hook.find_git_root(tmp_path) == tmp_path.resolve()
 
     def test_defaults_to_home_when_unset(self, hook, monkeypatch):
-        monkeypatch.delenv("MULTILINT_SEARCH_CEILING", raising=False)
+        monkeypatch.setattr(hook, "read_setting", lambda key: None)
         assert hook.search_ceiling() == Path.home()
 
 
@@ -332,8 +329,13 @@ class TestStateSchema:
     """Migration, not creation. This database already exists in the field."""
 
     def _legacy_db(self, tmp_path):
-        """A database in the original four-column shape, with a row in it."""
-        directory = tmp_path / "state"
+        """A database in the original four-column shape, with a row in it.
+
+        Named "multilint" directly under tmp_path (rather than an arbitrary "state" name) so
+        `XDG_STATE_HOME=tmp_path` reproduces state_dir()'s real, non-override path exactly --
+        MULTILINT_STATE_DIR is retired with no environment replacement.
+        """
+        directory = tmp_path / "multilint"
         directory.mkdir()
         with sqlite3.connect(directory / "changes.db") as connection:
             connection.execute("CREATE TABLE seen (path TEXT PRIMARY KEY, size INTEGER, mtime_ns INTEGER, digest TEXT)")
@@ -341,8 +343,8 @@ class TestStateSchema:
         return directory
 
     def test_adds_columns_to_an_existing_database(self, hook, tmp_path, monkeypatch):
-        directory = self._legacy_db(tmp_path)
-        monkeypatch.setenv("MULTILINT_STATE_DIR", str(directory))
+        self._legacy_db(tmp_path)
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
         connection = hook.open_state()
         assert connection is not None
         try:
@@ -353,8 +355,8 @@ class TestStateSchema:
 
     def test_migration_preserves_existing_rows(self, hook, tmp_path, monkeypatch):
         """A migration that loses history is a worse outcome than no migration."""
-        directory = self._legacy_db(tmp_path)
-        monkeypatch.setenv("MULTILINT_STATE_DIR", str(directory))
+        self._legacy_db(tmp_path)
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
         connection = hook.open_state()
         try:
             row = connection.execute("SELECT digest FROM seen WHERE path = '/old/file.py'").fetchone()
@@ -364,8 +366,8 @@ class TestStateSchema:
 
     def test_migration_is_idempotent(self, hook, tmp_path, monkeypatch):
         """Two sessions run this hook concurrently; the second must not fail on duplicate columns."""
-        directory = self._legacy_db(tmp_path)
-        monkeypatch.setenv("MULTILINT_STATE_DIR", str(directory))
+        self._legacy_db(tmp_path)
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
         first = hook.open_state()
         first.close()
         second = hook.open_state()
@@ -373,7 +375,7 @@ class TestStateSchema:
         second.close()
 
     def test_creates_the_folder_cache_table(self, hook, tmp_path, monkeypatch):
-        monkeypatch.setenv("MULTILINT_STATE_DIR", str(tmp_path / "fresh"))
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "fresh"))
         connection = hook.open_state()
         try:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(folders)")}
@@ -391,8 +393,8 @@ class TestGitRootCache:
 
     @pytest.fixture
     def state(self, hook, tmp_path, monkeypatch):
-        monkeypatch.setenv("MULTILINT_STATE_DIR", str(tmp_path / "state"))
-        monkeypatch.setenv("MULTILINT_SEARCH_CEILING", str(tmp_path))
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+        _set_ceiling(monkeypatch, hook, tmp_path)
         connection = hook.open_state()
         yield connection
         connection.close()
@@ -452,7 +454,7 @@ class TestGitRootCache:
 
     def test_works_without_a_database(self, hook, tmp_path, monkeypatch):
         """No database is a degraded mode, not a failure mode."""
-        monkeypatch.setenv("MULTILINT_SEARCH_CEILING", str(tmp_path))
+        _set_ceiling(monkeypatch, hook, tmp_path)
         (tmp_path / "repo" / ".git").mkdir(parents=True)
         root, from_cache = hook.cached_git_root(None, tmp_path / "repo")
         assert root == (tmp_path / "repo").resolve()
@@ -464,7 +466,7 @@ class TestChangeRecording:
 
     @pytest.fixture
     def state(self, hook, tmp_path, monkeypatch):
-        monkeypatch.setenv("MULTILINT_STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
         connection = hook.open_state()
         yield connection
         connection.close()
@@ -533,3 +535,91 @@ class TestFailingLines:
     def test_keeps_only_marked_lines(self, hook):
         output = "  ✓ flake8\n  ✗ black\n  ⚠ pylint: 3 failures\n  📄 file.sh\n"
         assert hook.failing_lines(output) == ["  ✗ black", "  ⚠ pylint: 3 failures"]
+
+
+class TestHookSettings:
+    """--set/--get/--unset: the fixed two-key allowlist that replaced MULTILINT_IMAGE and
+    MULTILINT_SEARCH_CEILING. Run as a real subprocess against a temporary changes.db so the
+    argv-gated CLI branch ahead of main()'s stdin read is exercised for real, not just the
+    underlying functions."""
+
+    def _cli_env(self, tmp_path):
+        return {**os.environ, "XDG_STATE_HOME": str(tmp_path)}
+
+    def test_set_then_get_round_trips_a_value(self, tmp_path):
+        env = self._cli_env(tmp_path)
+        subprocess.run(
+            [sys.executable, str(HOOK_PATH), "--set", "image", "local/build:dev"],
+            env=env,
+            check=True,
+        )
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH), "--get", "image"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        assert result.stdout.strip() == "local/build:dev"
+
+    def test_unset_removes_the_value(self, tmp_path):
+        env = self._cli_env(tmp_path)
+        subprocess.run(
+            [sys.executable, str(HOOK_PATH), "--set", "image", "local/build:dev"],
+            env=env,
+            check=True,
+        )
+        subprocess.run([sys.executable, str(HOOK_PATH), "--unset", "image"], env=env, check=True)
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH), "--get", "image"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        assert result.stdout.strip() == ""
+
+    def test_unknown_key_is_rejected_and_nothing_is_written(self, tmp_path):
+        env = self._cli_env(tmp_path)
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH), "--set", "eslint", "x"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode != 0
+        db_path = tmp_path / "multilint" / "changes.db"
+        if db_path.exists():
+            with sqlite3.connect(db_path) as connection:
+                row = connection.execute("SELECT 1 FROM settings WHERE key = ?", ("eslint",)).fetchone()
+                assert row is None
+
+    def test_resolvers_default_when_no_row_exists(self, hook, tmp_path, monkeypatch):
+        """Absent db/table/row all resolve to the built-in default, not an error."""
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+        assert hook.resolve_image() == hook.DEFAULT_IMAGE
+        assert hook.search_ceiling() == Path.home()
+
+
+class TestNoEnvironmentInfluence:
+    """MULTILINT_IMAGE, MULTILINT_SEARCH_CEILING and MULTILINT_STATE_DIR are retired with no
+    environment replacement (user decision, 2026-09-30). Regression guard that the removal is
+    complete, not partial: setting all three to values that would have changed the old behavior
+    must leave every resolver's result unchanged."""
+
+    def test_retired_variables_have_no_effect(self, hook, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+        monkeypatch.delenv("MULTILINT_IMAGE", raising=False)
+        monkeypatch.delenv("MULTILINT_SEARCH_CEILING", raising=False)
+        monkeypatch.delenv("MULTILINT_STATE_DIR", raising=False)
+        baseline_image = hook.resolve_image()
+        baseline_ceiling = hook.search_ceiling()
+        baseline_state_dir = hook.state_dir()
+
+        monkeypatch.setenv("MULTILINT_IMAGE", "local/other:dev")
+        monkeypatch.setenv("MULTILINT_SEARCH_CEILING", str(tmp_path / "elsewhere"))
+        monkeypatch.setenv("MULTILINT_STATE_DIR", str(tmp_path / "elsewhere" / "state"))
+
+        assert hook.resolve_image() == baseline_image
+        assert hook.search_ceiling() == baseline_ceiling
+        assert hook.state_dir() == baseline_state_dir
