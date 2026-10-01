@@ -27,10 +27,14 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import fs from "node:fs/promises";
+import os from "node:os";
+import { Database } from "bun:sqlite";
 
 const execFileAsync = promisify(execFile);
 
-// Published on Docker Hub, which serves anonymous pulls. Override to test a local build.
+// Published on Docker Hub, which serves anonymous pulls. Override with the "image" hook-setting
+// (`python3 claude-plugin/scripts/lint_changed.py --set image local/build:dev`) to test a local
+// build; this plugin only ever reads that setting, never writes it.
 const DEFAULT_IMAGE = "lehcode/multilint:latest";
 const CONTAINER_LINT_SH = "/usr/local/bin/lint.sh";
 
@@ -60,6 +64,53 @@ const LINTABLE_EXTENSIONS = new Set([
 // every write. lint.sh now picks --no-git when there is no repository, so the check produces a real
 // verdict either way and a reported skip means something again.
 const STRUCTURALLY_SKIPPED = new Set();
+
+/**
+ * Directory holding the settings database, mirroring state_dir() in lint_changed.py exactly: same
+ * fixed path, same XDG_STATE_HOME honouring, no MULTILINT_STATE_DIR equivalent.
+ */
+function stateDir() {
+  const xdg = process.env.XDG_STATE_HOME;
+  const base = xdg || path.join(os.homedir(), ".local", "state");
+  return path.join(base, "multilint");
+}
+
+/**
+ * Read-only lookup into the settings table the Python hook's --set/--get/--unset CLI writes.
+ * `{ readonly: true, create: false }` so a missing file cannot be created by the read path itself.
+ * A missing database file, a missing table and a missing row all resolve to null (-> built-in
+ * default) through the same catch, rather than three separately-tested failure paths.
+ */
+function readSetting(key) {
+  try {
+    const db = new Database(path.join(stateDir(), "changes.db"), {
+      readonly: true,
+      create: false,
+    });
+    try {
+      // Wait out a concurrent hook write, as the Python side does (timeout=10), instead of
+      // failing SQLITE_BUSY at once and quietly linting with the default image.
+      db.exec("PRAGMA busy_timeout = 10000");
+      const row = db.query("SELECT value FROM settings WHERE key = ?").get(key);
+      return row?.value ?? null;
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    // An absent db or table just means nothing is set. Anything else (still locked, corrupt)
+    // falls back to the default too, but says so: silently linting with another image would
+    // report on a different toolchain than the one configured.
+    if (!/unable to open|no such table/i.test(String(error?.message))) {
+      console.error(`[multilint] could not read the "${key}" setting, using the default: ${error?.message}`);
+    }
+    return null;
+  }
+}
+
+/** Image to run. The "image" hook-setting overrides the published default; this plugin never writes it. */
+function resolveImage() {
+  return readSetting("image") || DEFAULT_IMAGE;
+}
 
 /** Nearest ancestor containing .git, or null. Mirrors the scope-root rule in lint_changed.py. */
 async function findGitRoot(startDir) {
@@ -107,7 +158,7 @@ function buildDockerArgs(scopeRoot, relativePath) {
     // declares. POSIX only, which includes WSL; native Windows is not a target.
     "--user",
     `${process.getuid()}:${process.getgid()}`,
-    process.env.MULTILINT_IMAGE || DEFAULT_IMAGE,
+    resolveImage(),
     "-c",
     `bash ${CONTAINER_LINT_SH} "$1" --format json`,
     "_",
@@ -119,13 +170,6 @@ export default {
   id: "multilint-lint",
 
   async setup(ctx) {
-    if (process.env.MULTILINT_HOST) {
-      console.error(
-        "[multilint] MULTILINT_HOST is set but no longer used: linting now runs a container " +
-          "per write instead of calling an HTTP API. Set MULTILINT_IMAGE to choose an image.",
-      );
-    }
-
     ctx.tool.hook("execute.after", async (event) => {
       if (event.status !== "completed") return;
 
@@ -177,7 +221,13 @@ export default {
         (name) => !STRUCTURALLY_SKIPPED.has(name),
       );
       const failed = document.return_code !== 0;
-      if (!failed && skipped.length === 0) return;
+      // Mirrors config_warnings() in lint_changed.py: tolerant of a missing or malformed field,
+      // and surfaced independent of return_code -- a malformed .multilint.json is worth knowing
+      // about even on an otherwise-clean run.
+      const warnings = Array.isArray(document.warnings)
+        ? document.warnings.filter((w) => typeof w === "string")
+        : [];
+      if (!failed && skipped.length === 0 && warnings.length === 0) return;
 
       const notices = [];
       if (failed) {
@@ -201,6 +251,9 @@ export default {
           `multilint could not run these checks, so ${relativePath} is unverified for them: ` +
             skipped.join(", "),
         );
+      }
+      if (warnings.length) {
+        notices.push("multilint: config warning: " + warnings.join("; "));
       }
 
       event.result = {
