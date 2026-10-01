@@ -503,6 +503,18 @@ GITLEAKS_DEPTH="${ML_CFG_GITLEAKS_DEPTH:-1}"
 # Gitleaks config path override: .multilint.json's gitleaks.config, falling
 # back to the image/beside-script candidates tried below.
 GITLEAKS_CONFIG_OVERRIDE="${ML_CFG_GITLEAKS_CONFIG:-}"
+# A relative gitleaks.config is relative to the .multilint.json that names it,
+# not to whatever $PWD lint.sh happens to run in. A configured file that does
+# not exist is reported: falling through to the built-in rules unannounced
+# would drop the project's allowlist and custom rules without a trace.
+if [ -n "$GITLEAKS_CONFIG_OVERRIDE" ]; then
+    if [[ "$GITLEAKS_CONFIG_OVERRIDE" != /* ]] && [ -n "$ml_config_file" ]; then
+        GITLEAKS_CONFIG_OVERRIDE="$(dirname "$ml_config_file")/$GITLEAKS_CONFIG_OVERRIDE"
+    fi
+    if [ ! -f "$GITLEAKS_CONFIG_OVERRIDE" ]; then
+        ml_warnings+=("gitleaks.config: $GITLEAKS_CONFIG_OVERRIDE does not exist; using the built-in gitleaks rules")
+    fi
+fi
 
 # 3. Warnings -- printed once, regardless of output format, since this
 # explicit stderr redirect (>&2) bypasses the JSON-mode stdout swap above.
