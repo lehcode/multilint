@@ -11,20 +11,7 @@ per request. There is no server to connect to and no MCP tool to call.
 ## Invocation
 
 ```bash
-IMAGE="$(python3 - <<'PY'
-import os, sqlite3, sys
-from pathlib import Path
-db = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "multilint" / "changes.db"
-try:
-    if db.exists():
-        con = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True, timeout=10)
-        row = con.execute("SELECT value FROM settings WHERE key = 'image'").fetchone()
-        print(row[0] if row else "")
-except sqlite3.Error as exc:
-    if "no such table" not in str(exc):
-        print(f"multilint: could not read the image setting, using the default: {exc}", file=sys.stderr)
-PY
-)"
+IMAGE="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --get image)"
 IMAGE="${IMAGE:-lehcode/multilint:latest}"
 
 docker run --rm --network none --memory 2g --cpus 2 \
@@ -38,9 +25,9 @@ docker run --rm --network none --memory 2g --cpus 2 \
 `ROOT` is an absolute host path — the git root, or the directory containing what you are linting.
 `TARGET` is relative to `ROOT`. Pass a directory to lint a tree, or a single file to lint one file.
 `IMAGE` is no longer an environment variable — see "Changing image or search-ceiling settings"
-below for where it comes from. The lookup reads the settings database directly, so it works from
-any working directory; an absent database or row means the default image, and any other read
-error is printed rather than swallowed.
+below for where it comes from. `--get` prints nothing when no image is set, and prints a
+warning on stderr when the settings database exists but cannot be read; relay that warning to the
+user, because the run then uses the default image.
 
 | Choice | Reason |
 |---|---|
@@ -101,10 +88,10 @@ search for a project root, now live in a small SQLite `settings` table managed b
 `claude-plugin/scripts/lint_changed.py`'s CLI mode:
 
 ```bash
-python3 claude-plugin/scripts/lint_changed.py --set image local/multilint:dev
-python3 claude-plugin/scripts/lint_changed.py --get image
-python3 claude-plugin/scripts/lint_changed.py --unset image
-python3 claude-plugin/scripts/lint_changed.py --set search_ceiling /home/user/projects
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --set image local/multilint:dev
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --get image
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --unset image
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --set search_ceiling /home/user/projects
 ```
 
 Only `image` and `search_ceiling` are accepted keys; anything else exits non-zero and writes

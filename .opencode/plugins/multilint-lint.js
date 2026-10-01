@@ -71,7 +71,10 @@ const STRUCTURALLY_SKIPPED = new Set();
  */
 function stateDir() {
   const xdg = process.env.XDG_STATE_HOME;
-  const base = xdg || path.join(os.homedir(), ".local", "state");
+  // The XDG spec makes a relative value invalid, to be ignored; honouring it would look for the
+  // database relative to whatever directory OpenCode runs in.
+  const base =
+    xdg && path.isAbsolute(xdg) ? xdg : path.join(os.homedir(), ".local", "state");
   return path.join(base, "multilint");
 }
 
