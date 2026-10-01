@@ -134,7 +134,7 @@ run_one() { # $1 gen, $2 source, $3 agent
             const c=JSON.parse(fs.readFileSync(f,"utf8"));
             c.plugin=[process.argv[2]];
             fs.writeFileSync(f,JSON.stringify(c))' \
-            "$project/opencode.json" "${PLUGIN_ENTRY:-./.opencode/plugins/multilint.js}"
+            "$project/opencode.json" "${PLUGIN_ENTRY:-./.opencode/plugins/multilint.ts}"
     fi
     write_config "$dir/config" "$port"
     check="--docker-log $dir/docker.log"

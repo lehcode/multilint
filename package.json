@@ -38,6 +38,7 @@
     "build:js": "esbuild src/dual.ts --bundle --platform=node --minify --format=esm --external:@opencode/plugin --outfile=dist/dual.js",
     "build:types": "tsc -p tsconfig.json",
     "build": "npm run build:js && npm run build:types",
+    "test:js": "bun test tests/js",
     "build:watch": "esbuild src/dual.ts --bundle --platform=node --format=esm --external:@opencode/plugin --outfile=dist/dual.js --watch",
     "prepublishOnly": "npm run build"
   },
