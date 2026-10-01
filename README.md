@@ -400,6 +400,8 @@ When the multilint agent is selected, OpenCode loads `agents/multilint.md` as th
 
 The OpenCode plugin reads no environment variables. It runs the image named by the `image` setting (see "Host-plugin settings" above), else `lehcode/multilint:latest`, and lints with the project's `.multilint.json`.
 
+To check that the plugin loads on OpenCode V1 and V2 and that the model receives its notice, run `scripts/opencode-compat/run.sh --help` (a manual harness, not part of CI).
+
 ### Limitations
 
 - Plugin only hooks into tool executions; not triggered by file watchers or external edits

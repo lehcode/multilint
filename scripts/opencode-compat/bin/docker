@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Tier-1 docker shim: records argv, prints a canned failing lint document, exits 1 like lint.sh.
+printf '%s\n' "$*" >>"${FAKE_DOCKER_LOG:?FAKE_DOCKER_LOG is not set}"
+cat <<'JSON'
+{"return_code":1,"checks":{"shellcheck":{"status":"failed","fix":"fix the shell syntax","findings":[{"file":"broken.sh","line":2,"rule":"SC1073","symbol":"parse","message":"Couldn't parse this test expression."}]}},"summary":{"rules_violated":["SC1073"],"checks_skipped":[]},"warnings":[]}
+JSON
+exit 1
