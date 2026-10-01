@@ -16,7 +16,25 @@ ENV DEBIAN_FRONTEND=noninteractive
 # happens immediately before ENTRYPOINT, which leaves the runtime unprivileged
 # while letting the image build.
 
-COPY --from=node-tools /usr/local/bin/markdownlint /usr/local/bin/markdownlint
+# markdownlint-cli is an ESM CLI that resolves commander, micromatch and the
+# rest through node_modules at run time.
+#
+# The previous form was:
+#     COPY --from=node-tools /usr/local/bin/markdownlint /usr/local/bin/markdownlint
+# In the node-tools stage that path is a symlink into
+# /usr/local/lib/node_modules/markdownlint-cli/, and COPY dereferences it, so the
+# image received a standalone 12 KB markdownlint.js and no dependency tree at
+# all — /usr/local/lib/node_modules did not exist. Every invocation died with
+# "Cannot find package 'commander' imported from /usr/local/bin/markdownlint",
+# which lint.sh then swallowed and reported as ✓. Verified in the running image.
+#
+# Copying the tree and recreating the launcher as a symlink keeps node's
+# resolution walking up from the real script location, which is what finds the
+# hoisted top-level dependencies.
+COPY --from=node-tools /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf /usr/local/lib/node_modules/markdownlint-cli/markdownlint.js \
+        /usr/local/bin/markdownlint \
+    && chmod +x /usr/local/lib/node_modules/markdownlint-cli/markdownlint.js
 
 RUN apt-get update && apt-get install -y \
     shellcheck \

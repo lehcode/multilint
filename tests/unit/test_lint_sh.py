@@ -2,10 +2,28 @@
 
 # pylint: disable=redefined-outer-name
 import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
+import pytest
+
 LINT_SH = Path(__file__).parent.parent.parent / "lint.sh"
+
+
+@pytest.fixture(autouse=True)
+def _ml_isolated_cwd(monkeypatch):
+    """Run every test in this module from an empty directory.
+
+    See test_lint_sh_extended.py's fixture of the same name for the reason:
+    lint.sh now reads $PWD/.multilint.json first, and several tests below
+    already pass cwd=sample_project explicitly for other reasons — this
+    fixture only protects the ones that do not.
+    """
+    with tempfile.TemporaryDirectory() as empty_dir:
+        monkeypatch.chdir(empty_dir)
+        yield
 
 
 class TestFileDiscovery:
@@ -161,7 +179,9 @@ class TestThresholds:
         assert "shellcheck: 1 failures (threshold: 2)" in result.stdout
         assert "bash_syntax: 1 failures (threshold: 0)" in result.stdout
         assert "bashate: 1 failures (threshold: 0)" in result.stdout
-        assert "shfmt: 0 failures (threshold: 0)" in result.stdout
+        # The fixture is misformatted, so shfmt fails wherever it is installed; without it the check is skipped.
+        expected_shfmt = 1 if shutil.which("shfmt") else 0
+        assert f"shfmt: {expected_shfmt} failures (threshold: 0)" in result.stdout
 
     def test_threshold_exceeded(self, sample_project_with_threshold_config):
         """When failures exceed threshold, check is marked with ⚠ and fails."""

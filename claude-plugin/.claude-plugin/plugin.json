@@ -1,0 +1,10 @@
+{
+  "name": "multilint",
+  "description": "Lints changed files in a throwaway container after every edit, and adds a linting subagent. Requires docker on PATH.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Anton Repin"
+  },
+  "homepage": "https://github.com/lehcode/multilint",
+  "license": "MIT"
+}

@@ -1,3 +1,34 @@
+---
+# Optional long-running service: the HTTP API on 8591 and the MCP server on 8592.
+#
+# The plugins no longer use this. Both the Claude Code hook and the OpenCode plugin run a throwaway
+# container per invocation, which needs no compose file, no fixed mounts and no listening port. This
+# stack remains for the MCP-registry surface and for anyone who wants a persistent endpoint.
+#
+# WHAT CHANGED AND WHY
+#
+# The mounts used to be hardcoded to ~/lan-hosts and ~/docker-compose.d/multilint — directories that
+# exist on exactly one machine. Worse, mounts and MULTILINT_ALLOWED_ROOTS are fixed when the
+# container starts, and the ports are published on the host, so one container could serve only the
+# projects it was started with. Adding a project meant recreating the container and killing every
+# other agent's in-flight lint. That is the limitation the per-invocation model exists to remove.
+#
+# Mounts are now env-driven, defaulting to the directory you invoke compose from:
+#
+#   cd /path/to/project && docker compose -f <this file> up -d
+#   MULTILINT_WORKSPACE=/path/to/project docker compose up -d
+#
+# It must keep a default. As `${MULTILINT_WORKSPACE:?...}` it was mandatory for `down`, `ps`, `logs`
+# and `config` too, because compose interpolates the whole file before dispatching any subcommand —
+# so a started container could not be stopped through compose.
+#
+# ALLOWED_ROOTS defaults to the mount target rather than being hardcoded. It is the path-injection
+# allowlist server.py enforces; leaving it unset makes the API accept any absolute path inside the
+# container, so it is set here deliberately.
+#
+# Ports bind to 127.0.0.1 rather than 0.0.0.0. The API is unauthenticated and accepts a directory to
+# run in, so exposing it to the LAN hands every host on the network a file-reading primitive.
+
 services:
   multilint:
     container_name: multilint
@@ -6,15 +37,17 @@ services:
     environment:
       - CONTINUOUS_LINT=1
       - LINT_SERVER_PORT=8591
+      # Listen on all interfaces *inside* the container; the port publication below is what
+      # restricts reachability to loopback on the host.
       - LINT_SERVER_HOST=0.0.0.0
       - MCP_SERVER_PORT=8592
-      - MULTILINT_ALLOWED_ROOTS=/workspace:/multilint
+      - MULTILINT_ALLOWED_ROOTS=${MULTILINT_CONTAINER_TARGET:-/workspace}
     ports:
-      - "8591:8591"
-      - "8592:8592"
+      - "127.0.0.1:8591:8591"
+      - "127.0.0.1:8592:8592"
     volumes:
-      - ~/lan-hosts:/workspace:ro
-      - ~/docker-compose.d/multilint:/multilint:ro
+      # Read-only: every check is check-only, nothing is auto-fixed.
+      - ${MULTILINT_WORKSPACE:-$PWD}:${MULTILINT_CONTAINER_TARGET:-/workspace}:ro
     restart: unless-stopped
     deploy:
       resources:
