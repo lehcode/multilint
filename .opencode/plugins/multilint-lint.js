@@ -48,6 +48,9 @@ const CPU_LIMIT = "2";
 // Cap on text handed to the agent. A failing file's full output runs to several kilobytes.
 const MAX_OUTPUT_CHARS = 4000;
 
+// The message lint.sh gives a formatter finding; the check's "fix" line already says it.
+const FORMAT_ONLY_MESSAGE = "formatting required";
+
 const LINTABLE_EXTENSIONS = new Set([
   ".sh",
   ".bash", // shell scripts
@@ -169,6 +172,46 @@ function buildDockerArgs(scopeRoot, relativePath) {
   ];
 }
 
+/**
+ * Failed check names and their notice blocks, built from the "findings"/"fix" fields. Mirrors
+ * finding_blocks() in lint_changed.py. Both are empty for a document from an older image, whose
+ * checks carry counts only, so the caller can fall back to the marker lines.
+ */
+function findingBlocks(document) {
+  const names = [];
+  const blocks = [];
+  for (const [name, check] of Object.entries(document.checks || {})) {
+    if (!check || check.status !== "failed" || !Array.isArray(check.findings)) continue;
+    names.push(name);
+    const lines = [typeof check.fix === "string" && check.fix ? `${name} — ${check.fix}` : name];
+    for (const item of check.findings) {
+      if (!item || item.message === FORMAT_ONLY_MESSAGE) continue;
+      const location =
+        item.line !== null && item.line !== undefined && item.file ? `${item.file}:${item.line}` : item.file || "";
+      const head = [item.rule, item.symbol, location].filter(Boolean).join(" ");
+      lines.push(`  ${head}  ${item.message || ""}`.trimEnd());
+    }
+    if (check.findings_truncated) lines.push("  … more findings omitted");
+    blocks.push(lines.join("\n"));
+  }
+  return { names, blocks };
+}
+
+/** The structured failure notice: header, findings, Rules footer. Only the findings are cut to the cap. */
+function structuredNotice(relativePath, document, { names, blocks }) {
+  const header = `multilint: ${relativePath} failed ${names.join(", ")}`;
+  const rules = Array.isArray(document.summary?.rules_violated)
+    ? document.summary.rules_violated.filter((r) => typeof r === "string")
+    : [];
+  const footer = rules.length ? `Rules: ${rules.join(" ")}` : "";
+  let body = blocks.join("\n");
+  const budget = MAX_OUTPUT_CHARS - header.length - footer.length - 4;
+  if (body.length > budget) {
+    body = body.slice(0, Math.max(budget - 2, 0)).split("\n").slice(0, -1).join("\n") + "\n…";
+  }
+  return [header, body, footer].filter(Boolean).join("\n\n");
+}
+
 export default {
   id: "multilint-lint",
 
@@ -233,8 +276,11 @@ export default {
       if (!failed && skipped.length === 0 && warnings.length === 0) return;
 
       const notices = [];
-      if (failed) {
-        // Only the marked lines; the full transcript is mostly passing checks.
+      const structured = findingBlocks(document);
+      if (failed && structured.names.length) {
+        notices.push(structuredNotice(relativePath, document, structured));
+      } else if (failed) {
+        // Older image, no findings: only the marked lines; the full transcript is mostly passing checks.
         const lines = detail
           .split("\n")
           .filter((line) => line.includes("✗") || line.includes("⚠"))

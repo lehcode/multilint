@@ -830,3 +830,30 @@ class TestSliceThreeEssentials:
         (proj / "missing.toml").write_text("", encoding="utf-8")
         data = _lint_json(proj, cwd=tmp_dir)
         assert not any("gitleaks.config" in w for w in data["warnings"]), data["warnings"]
+
+
+class TestFindings:
+    """Failing checks carry their findings and a fix hint in the JSON."""
+
+    @staticmethod
+    def _lint_bad_python(tmp_path):
+        (tmp_path / "a.py").write_text("import os\ndef f( x ):\n  return x\n")
+        result = subprocess.run(
+            ["bash", str(LINT_SH), "a.py", "--format", "json"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+        )
+        return json.loads(result.stdout)
+
+    @pytest.mark.skipif(shutil.which("flake8") is None, reason="flake8 not installed")
+    def test_flake8_finding_has_file_line_and_rule(self, tmp_path):
+        data = self._lint_bad_python(tmp_path)
+        findings = data["checks"]["flake8"]["findings"]
+        assert {"file": "a.py", "line": 1, "rule": "F401", "message": "'os' imported but unused"} in findings
+        assert "F401" in data["summary"]["rules_violated"]
+
+    @pytest.mark.skipif(shutil.which("black") is None, reason="black not installed")
+    def test_formatter_fix_hint_is_the_exact_command(self, tmp_path):
+        data = self._lint_bad_python(tmp_path)
+        assert data["checks"]["black"]["fix"] == "formatting only; run: black --line-length=120 a.py"

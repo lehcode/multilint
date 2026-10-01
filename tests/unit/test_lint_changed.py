@@ -644,3 +644,28 @@ class TestNoEnvironmentInfluence:
         assert hook.resolve_image() == baseline_image
         assert hook.search_ceiling() == baseline_ceiling
         assert hook.state_dir() == baseline_state_dir
+
+
+class TestFindingsNotice:
+    def test_notice_is_built_from_a_findings_document(self, hook):
+        document = {
+            "return_code": 1,
+            "summary": {"rules_violated": ["F401"]},
+            "checks": {
+                "flake8": {
+                    "status": "failed",
+                    "fix": "fix the code (policy: checks.flake8.args)",
+                    "findings": [{"file": "a.py", "line": 1, "rule": "F401", "message": "'os' imported but unused"}],
+                },
+            },
+        }
+        results = [("a.py", document, "")]
+        findings, skipped, warnings, failed = hook.summarize_results(results)
+        names = hook.finding_blocks(document)[0]
+        (notice,) = hook.build_notices("a.py", findings, skipped, warnings, failed, names, hook.violated_rules(results))
+        assert notice == (
+            "multilint: a.py failed flake8\n\n"
+            "flake8 — fix the code (policy: checks.flake8.args)\n"
+            "  F401 a.py:1  'os' imported but unused\n\n"
+            "Rules: F401"
+        )

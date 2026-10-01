@@ -49,6 +49,14 @@
 #   off, so a consumer can tell "nothing was wrong" from "nothing was checked".
 #   summary.checks_skipped lists those names, and summary.checks_run is derived
 #   from the check list rather than hardcoded.
+#
+#   A failed check also carries (additive, absent otherwise):
+#   findings            [{file, line, rule, message}] parsed from the tool's
+#                       output, at most 50 (findings_truncated: true when cut);
+#                       line/rule are null when the tool gives none
+#   fix                 one-line hint: the exact auto-fix command for formatters,
+#                       otherwise "fix the code" (+ a docs link per rule)
+#   summary.rules_violated  sorted unique rule IDs across all failed checks
 
 # Configurable thresholds per check (zero tolerance = default)
 #
@@ -533,6 +541,23 @@ ran()  { check_totals[$1]=$(( check_totals[$1] + 1 )); }
 # per-file loops, so this fires once per file when a tool is missing.
 skipped() { check_status[$1]="skipped"; }
 
+# Raw tool output per failing unit, kept for the JSON emitter, which parses it
+# into "findings". One <seq>.<check>.file/.out pair per call so the emitter can
+# replay them in order and no tool output can collide with a delimiter. The
+# human report above is unchanged: this only keeps a copy.
+ML_MSG_DIR="$(mktemp -d 2>/dev/null)" || ML_MSG_DIR=""
+if [ -n "$ML_MSG_DIR" ]; then
+    trap 'rm -rf "$ML_MSG_DIR"' EXIT
+fi
+ml_msg_seq=0
+# record_output <check> <file> <raw output>; <file> is "" for repo-wide tools.
+record_output() {
+    [ -n "$ML_MSG_DIR" ] || return 0
+    ml_msg_seq=$(( ml_msg_seq + 1 ))
+    printf '%s' "$2" >"$ML_MSG_DIR/$(printf '%04d' "$ml_msg_seq").$1.file"
+    printf '%s\n' "$3" >"$ML_MSG_DIR/$(printf '%04d' "$ml_msg_seq").$1.out"
+}
+
 # True unless "<check>_enabled" has been set to "off" (built-in default, then
 # .multilint.json). One helper shared by every one of the sixteen checks so
 # there is a single oracle for "is this check switched on".
@@ -567,7 +592,9 @@ else
             if bash -n "$f" >/dev/null 2>&1; then
                 pass "bash syntax"
             else
-                echo "    $(bash -n "$f" 2>&1)"
+                bs_output="$(bash -n "$f" 2>&1 || true)"
+                echo "    $bs_output"
+                record_output bash_syntax "$f" "$bs_output"
                 check_failures[bash_syntax]=$(( check_failures[bash_syntax] + 1 ))
                 fail "bash syntax"
             fi
@@ -575,19 +602,22 @@ else
 
         # ShellCheck — policy flags come from shellcheck_args (default:
         # excludes SC1091/SC2155/SC2086, reports down to style severity).
+        # -f gcc is a harness flag, always kept after the policy flags: one
+        # file:line:col line per finding, which the JSON emitter can parse.
         if ! check_enabled shellcheck; then
             skipped shellcheck
             warn "shellcheck (disabled)"
         elif command -v shellcheck >/dev/null 2>&1; then
             ran shellcheck
             set +e
-            sc_output="$(shellcheck "${shellcheck_args[@]+"${shellcheck_args[@]}"}" "$f" 2>&1)"
+            sc_output="$(shellcheck "${shellcheck_args[@]+"${shellcheck_args[@]}"}" -f gcc "$f" 2>&1)"
             sc_code=$?
             set -e
             if [ "$sc_code" -eq 0 ]; then
                 pass "shellcheck"
             else
                 echo "    $sc_output"
+                record_output shellcheck "$f" "$sc_output"
                 check_failures[shellcheck]=$(( check_failures[shellcheck] + 1 ))
                 fail "shellcheck"
             fi
@@ -611,6 +641,7 @@ else
                 pass "bashate"
             else
                 echo "    $bashate_output"
+                record_output bashate "$f" "$bashate_output"
                 check_failures[bashate]=$(( check_failures[bashate] + 1 ))
                 fail "bashate (indentation required)"
             fi
@@ -639,6 +670,7 @@ else
         elif command -v shfmt >/dev/null 2>&1; then
             ran shfmt
             if shfmt "${shfmt_args[@]+"${shfmt_args[@]}"}" -d "$f" | grep -q .; then
+                record_output shfmt "$f" ""
                 check_failures[shfmt]=$(( check_failures[shfmt] + 1 ))
                 fail "shfmt (formatting required)"
             else
@@ -697,6 +729,7 @@ else
                 pass "flake8"
             else
                 echo "    $pb_flake8"
+                record_output flake8 "$f" "$pb_flake8"
                 check_failures[flake8]=$(( check_failures[flake8] + 1 ))
                 fail "flake8"
             fi
@@ -720,6 +753,7 @@ else
                 pass "black"
             else
                 echo "    $pb_black"
+                record_output black "$f" "$pb_black"
                 check_failures[black]=$(( check_failures[black] + 1 ))
                 fail "black"
             fi
@@ -743,6 +777,7 @@ else
                 pass "pylint"
             else
                 echo "    $pb_pylint"
+                record_output pylint "$f" "$pb_pylint"
                 check_failures[pylint]=$(( check_failures[pylint] + 1 ))
                 fail "pylint"
             fi
@@ -773,6 +808,7 @@ else
                 pass "mypy"
             else
                 echo "    $pb_mypy"
+                record_output mypy "$f" "$pb_mypy"
                 check_failures[mypy]=$(( check_failures[mypy] + 1 ))
                 fail "mypy"
             fi
@@ -798,6 +834,7 @@ else
                 pass "bandit"
             else
                 echo "    $pb_bandit"
+                record_output bandit "$f" "$pb_bandit"
                 check_failures[bandit]=$(( check_failures[bandit] + 1 ))
                 fail "bandit"
             fi
@@ -863,6 +900,7 @@ else
                 pass "markdownlint"
             else
                 echo "    $md_output"
+                record_output markdownlint "$f" "$md_output"
                 check_failures[markdownlint]=$(( check_failures[markdownlint] + 1 ))
                 fail "markdownlint"
             fi
@@ -930,6 +968,7 @@ elif command -v prettier >/dev/null 2>&1; then
                     pass "yaml prettier"
                 else
                     echo "    $prettier_output"
+                    record_output yaml_prettier "$f" "$prettier_output"
                     check_failures[yaml_prettier]=$(( check_failures[yaml_prettier] + 1 ))
                     fail "yaml prettier"
                 fi
@@ -949,6 +988,7 @@ elif command -v prettier >/dev/null 2>&1; then
                     pass "json prettier"
                 else
                     echo "    $prettier_output"
+                    record_output json_prettier "$f" "$prettier_output"
                     check_failures[json_prettier]=$(( check_failures[json_prettier] + 1 ))
                     fail "json prettier"
                 fi
@@ -1008,6 +1048,7 @@ else
                 pass "toml-sort"
             else
                 echo "    $toml_output"
+                record_output toml_sort "$f" "$toml_output"
                 check_failures[toml_sort]=$(( check_failures[toml_sort] + 1 ))
                 fail "toml-sort"
             fi
@@ -1063,6 +1104,7 @@ else
             check_failures[security_secrets]=$(( check_failures[security_secrets] + 1 ))
             echo "  ✗ hardcoded secrets: $f"
             echo "    $secret_output"
+            record_output security_secrets "$f" "$secret_output"
             fail "security (hardcoded secrets)"
         fi
     done
@@ -1089,6 +1131,7 @@ else
             check_failures[security_secrets]=$(( check_failures[security_secrets] + 1 ))
             echo "  ✗ hardcoded secrets: $f"
             echo "    $py_secret_output"
+            record_output security_secrets "$f" "$py_secret_output"
             fail "security (hardcoded secrets)"
         fi
     done
@@ -1114,6 +1157,7 @@ else
             check_failures[security_dangerous_patterns]=$(( check_failures[security_dangerous_patterns] + 1 ))
             echo "  ✗ dangerous patterns: $f"
             echo "    $dangerous_output"
+            record_output security_dangerous_patterns "$f" "$dangerous_output"
             fail "security (dangerous patterns)"
         fi
     done
@@ -1233,6 +1277,7 @@ elif command -v gitleaks >/dev/null 2>&1; then
         pass "gitleaks"
     elif [ "$gitleaks_findings" -gt 0 ]; then
         echo "$gitleaks_output" | head -50
+        record_output gitleaks "" "$gitleaks_output"
         check_failures[gitleaks]=$gitleaks_findings
         fail "gitleaks"
     else
@@ -1326,6 +1371,17 @@ if [ "$OUTPUT_FORMAT" = "json" ]; then
         FIRST=0
     done
     export ML_FILES
+    # Per-check message directory and the effective policy flags of the
+    # formatters, which the emitter needs to spell out exact auto-fix commands.
+    # printf %q keeps each flag paste-safe in the hint.
+    export ML_MSG_DIR
+    for check in black shfmt yaml_prettier json_prettier toml_sort; do
+        declare -n ml_args_ref="${check}_args"
+        if [ "${#ml_args_ref[@]}" -gt 0 ]; then
+            export "ML_ARGS_${check}=$(printf '%q ' "${ml_args_ref[@]}")"
+        fi
+        unset -n ml_args_ref
+    done
     # Emission order for the "checks" object. Reading os.environ instead would
     # make key order depend on the environment, so it varied run to run.
     ML_CHECK_ORDER="$(IFS=,; echo "${ALL_CHECKS[*]}")"
@@ -1343,7 +1399,7 @@ if [ "$OUTPUT_FORMAT" = "json" ]; then
     # shellcheck disable=SC2155
     _ml_json="$(
         python3 <<'ML_PYTHON'
-import json, os
+import glob, json, os, re, shlex
 
 # Record layout exported by the shell above:
 #   failures : threshold : threshold_exceeded : status : total
@@ -1373,6 +1429,176 @@ for name in os.environ.get("ML_CHECK_ORDER", "").split(","):
             # indistinguishable from one that ran and found nothing.
             "status": parts[STATUS],
         }
+
+
+# Findings: each tool's native line format parsed into {file, line, rule,
+# message}. A line that does not parse is kept with line/rule null, never
+# dropped, except the decorative lines listed in SKIP_LINES. "symbol" is an
+# additive extra for tools that name a rule twice (pylint, markdownlint).
+MAX_FINDINGS = 50
+FORMAT_MESSAGE = "formatting required"
+PARSERS = {
+    "bash_syntax": r"^(?P<file>.+?): line (?P<line>\d+): (?P<message>.*)$",
+    "shellcheck": r"^(?P<file>.+?):(?P<line>\d+):\d+: \w+: (?P<message>.*) \[(?P<rule>SC\d+)\]$",
+    "bashate": r"^(?P<file>.+?):(?P<line>\d+):\d+: (?P<rule>E\d+) (?P<message>.*)$",
+    "flake8": r"^(?P<file>.+?):(?P<line>\d+):\d+: (?P<rule>[A-Z]+\d+) (?P<message>.*)$",
+    "pylint": r"^(?P<file>.+?):(?P<line>\d+):\d+: (?P<rule>[A-Z]\d+): (?P<message>.*) \((?P<symbol>[\w-]+)\)$",
+    "mypy": r"^(?P<file>.+?):(?P<line>\d+):(?:\d+:)? (?:error|note|warning): (?P<message>.*?)(?:  \[(?P<rule>[\w-]+)\])?$",
+    "bandit": r"^(?P<file>.+?):(?P<line>\d+): \[(?P<rule>B\d+)\] (?P<message>.*)$",
+    "markdownlint": r"^(?P<file>.+?):(?P<line>\d+)(?::\d+)? (?:error|warning) (?P<rule>MD\d+)/(?P<symbol>\S+) (?P<message>.*)$",
+    # grep -n on a single file: "<line>:<matched text>". The matched text is
+    # not echoed for secrets, so a finding never carries the secret itself.
+    "security_secrets": r"^(?P<line>\d+):.*$",
+    "security_dangerous_patterns": r"^(?P<line>\d+):(?P<message>.*)$",
+}
+FIXED = {
+    "security_secrets": {"rule": "hardcoded-secret", "message": "possible hardcoded secret"},
+    "security_dangerous_patterns": {"rule": "dangerous-pattern"},
+}
+SKIP_LINES = {
+    "pylint": r"^(\*+ Module .*|-{5,}|Your code has been rated .*)$",
+    "bashate": r"^\d+ bashate error\(s\) found$",
+}
+# Formatters: one finding per file, no rule. Output lines that mention an error
+# (a parse failure, a bad flag) are reported as findings of their own instead.
+FORMATTERS = {
+    "black": "black {args} {files}",
+    "shfmt": "shfmt {args} -w {files}",
+    "yaml_prettier": "prettier --write {args} {files}",
+    "json_prettier": "prettier --write {args} {files}",
+    "toml_sort": "toml-sort {args} -i {files}",
+}
+NO_ARGS_CHECKS = ("bash_syntax", "security_secrets", "security_dangerous_patterns")
+DOC_LINKS = {
+    "shellcheck": "https://www.shellcheck.net/wiki/{rule}",
+    "markdownlint": "https://github.com/DavidAnson/markdownlint/blob/main/doc/{rule_lower}.md",
+}
+MAX_DOC_LINKS = 10
+MAX_FIX_FILES = 20
+
+
+def make_finding(file, line, rule, message, symbol=None):
+    item = {"file": file, "line": line, "rule": rule, "message": message}
+    if symbol:
+        item["symbol"] = symbol
+    return item
+
+
+def parse_gitleaks(text):
+    """gitleaks --verbose prints one "Key: value" block per leak; the secret itself is never copied."""
+    found, current = [], None
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        key, value = key.strip(), value.strip()
+        if key == "Finding":
+            current = {}
+            found.append(current)
+        elif current is not None and key in ("RuleID", "File", "Line", "Description"):
+            current[key] = value
+    return [
+        make_finding(
+            item.get("File", ""),
+            int(item["Line"]) if item.get("Line", "").isdigit() else None,
+            item.get("RuleID"),
+            item.get("Description") or "secret detected",
+        )
+        for item in found
+    ]
+
+
+def parse_output(check, file, text):
+    if check == "gitleaks":
+        parsed = parse_gitleaks(text)
+        if parsed:
+            return parsed
+    if check in FORMATTERS:
+        errors = [
+            re.sub(r"^(\[error\]|error:)\s*", "", line.strip(), flags=re.I)
+            for line in text.splitlines()
+            if re.search(r"\berror\b", line, re.I)
+        ]
+        return [make_finding(file, None, None, e) for e in errors] or [
+            make_finding(file, None, None, FORMAT_MESSAGE)
+        ]
+    pattern = re.compile(PARSERS[check]) if check in PARSERS else None
+    skip = re.compile(SKIP_LINES[check]) if check in SKIP_LINES else None
+    results = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip() or (skip and skip.match(line.strip())):
+            continue
+        match = pattern.match(line) if pattern else None
+        if match is None:
+            results.append(make_finding(file, None, None, line.strip()))
+            continue
+        fields = match.groupdict()
+        fields.update(FIXED.get(check, {}))
+        results.append(
+            make_finding(
+                fields.get("file") or file,
+                int(fields["line"]),
+                fields.get("rule"),
+                fields.get("message") or "",
+                fields.get("symbol"),
+            )
+        )
+    return results
+
+
+def collect_findings(check):
+    msg_dir = os.environ.get("ML_MSG_DIR", "")
+    results = []
+    for out_path in sorted(glob.glob(os.path.join(glob.escape(msg_dir), "*.%s.out" % check))) if msg_dir else []:
+        try:
+            with open(out_path[:-4] + ".file", encoding="utf-8", errors="replace") as handle:
+                file = handle.read()
+            with open(out_path, encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            continue
+        results.extend(parse_output(check, file, text))
+    # Parsed findings first, so tool noise never crowds them out of the cap.
+    results.sort(key=lambda item: item["rule"] is None and item["line"] is None)
+    return results
+
+
+def fix_hint(check, findings):
+    if check in FORMATTERS:
+        files = []
+        for item in findings:
+            if item["message"] == FORMAT_MESSAGE and item["file"] not in files:
+                files.append(item["file"])
+        if files:
+            command = FORMATTERS[check].format(
+                args=os.environ.get("ML_ARGS_" + check, "").strip(),
+                files=" ".join(shlex.quote(f) for f in files[:MAX_FIX_FILES]),
+            )
+            return "formatting only; run: " + " ".join(command.split())
+    if check == "gitleaks":
+        hint = "remove the secret from the code and rotate it (policy: checks.gitleaks.args)"
+    elif check in NO_ARGS_CHECKS:
+        hint = "fix the code"
+    else:
+        hint = "fix the code (policy: checks.%s.args)" % check
+    rules = sorted({item["rule"] for item in findings if item["rule"]})
+    if check in DOC_LINKS and rules:
+        links = [DOC_LINKS[check].format(rule=r, rule_lower=r.lower()) for r in rules[:MAX_DOC_LINKS]]
+        hint += "; docs: " + " ".join(links)
+    return hint
+
+
+rules_violated = set()
+for name, entry in checks.items():
+    if entry["status"] != "failed":
+        continue
+    findings = collect_findings(name)
+    rules_violated.update(item["rule"] for item in findings if item["rule"])
+    if len(findings) > MAX_FINDINGS:
+        entry["findings"] = findings[:MAX_FINDINGS]
+        entry["findings_truncated"] = True
+    else:
+        entry["findings"] = findings
+    entry["fix"] = fix_hint(name, findings)
 files = [f.strip() for f in os.environ.get("ML_FILES", "").split(",") if f.strip()]
 skipped = sorted(n for n, c in checks.items() if c["status"] == "skipped")
 warnings = [w for w in os.environ.get("ML_WARNINGS", "").split("\n") if w]
@@ -1383,6 +1609,9 @@ result = {
         # Promoted into the summary so a consumer can react to skipped checks
         # without walking every entry in "checks".
         "checks_skipped": skipped,
+        # Sorted unique rule IDs across every failed check's findings (before
+        # the per-check cap, so a truncated list never hides a rule). Additive.
+        "rules_violated": sorted(rules_violated),
     },
     "checks": checks,
     "return_code": int(os.environ.get("ML_EXIT_CODE", "0")),
