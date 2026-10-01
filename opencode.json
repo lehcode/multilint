@@ -15,5 +15,5 @@
       }
     }
   },
-  "plugin": ["./.opencode/plugins/multilint-lint.js"]
+  "plugin": ["./.opencode/plugins/multilint.js"]
 }

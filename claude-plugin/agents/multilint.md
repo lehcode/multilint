@@ -11,7 +11,7 @@ per request. There is no server to connect to and no MCP tool to call.
 ## Invocation
 
 ```bash
-IMAGE="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --get image)"
+IMAGE="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/multilint.py" --get image)"
 IMAGE="${IMAGE:-lehcode/multilint:latest}"
 
 docker run --rm --network none --memory 2g --cpus 2 \
@@ -70,7 +70,7 @@ harness flags only. `gitleaks`, `bandit`, and `mypy` also accept an options obje
 | `bandit` | `-q <bandit.severity> -f custom --msg-template ...` | empty — severity is `bandit.severity`, not `args` |
 | `markdownlint` | none | `-c .markdownlint.json` when that file exists in `$PWD`, else empty |
 | `yaml_prettier` / `json_prettier` | `--check --log-level error` | empty |
-| `toml_sort` | `--check` | `--sort-keys` |
+| `toml_sort` | `--check` | `--sort-table-keys` |
 | `security_secrets` / `security_dangerous_patterns` | grep pattern | n/a — `args` unsupported |
 | `gitleaks` | `detect`, `--source`/`--no-git --source`, config/depth flags, `--verbose --no-color --no-banner` | empty |
 
@@ -85,13 +85,13 @@ check's findings.
 `MULTILINT_IMAGE` and `MULTILINT_SEARCH_CEILING` are retired along with every other environment
 variable. The container image both plugins run, and the highest directory the Python hook may
 search for a project root, now live in a small SQLite `settings` table managed by
-`claude-plugin/scripts/lint_changed.py`'s CLI mode:
+`claude-plugin/scripts/multilint.py`'s CLI mode:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --set image local/multilint:dev
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --get image
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --unset image
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --set search_ceiling /home/user/projects
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/multilint.py" --set image local/multilint:dev
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/multilint.py" --get image
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/multilint.py" --unset image
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/multilint.py" --set search_ceiling /home/user/projects
 ```
 
 Only `image` and `search_ceiling` are accepted keys; anything else exits non-zero and writes

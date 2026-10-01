@@ -1,5 +1,5 @@
 /**
- * multilint-lint.js — OpenCode V2 plugin that lints a file after it is written.
+ * multilint.js — OpenCode V2 plugin that lints a file after it is written.
  *
  * Runs one throwaway container per write:
  *
@@ -33,7 +33,7 @@ import { Database } from "bun:sqlite";
 const execFileAsync = promisify(execFile);
 
 // Published on Docker Hub, which serves anonymous pulls. Override with the "image" hook-setting
-// (`python3 claude-plugin/scripts/lint_changed.py --set image local/build:dev`) to test a local
+// (`python3 claude-plugin/scripts/multilint.py --set image local/build:dev`) to test a local
 // build; this plugin only ever reads that setting, never writes it.
 const DEFAULT_IMAGE = "lehcode/multilint:latest";
 const CONTAINER_LINT_SH = "/usr/local/bin/lint.sh";
@@ -69,7 +69,7 @@ const LINTABLE_EXTENSIONS = new Set([
 const STRUCTURALLY_SKIPPED = new Set();
 
 /**
- * Directory holding the settings database, mirroring state_dir() in lint_changed.py exactly: same
+ * Directory holding the settings database, mirroring state_dir() in multilint.py exactly: same
  * fixed path, same XDG_STATE_HOME honouring, no MULTILINT_STATE_DIR equivalent.
  */
 function stateDir() {
@@ -118,7 +118,7 @@ function resolveImage() {
   return readSetting("image") || DEFAULT_IMAGE;
 }
 
-/** Nearest ancestor containing .git, or null. Mirrors the scope-root rule in lint_changed.py. */
+/** Nearest ancestor containing .git, or null. Mirrors the scope-root rule in multilint.py. */
 async function findGitRoot(startDir) {
   let current = path.resolve(startDir);
   for (;;) {
@@ -174,7 +174,7 @@ function buildDockerArgs(scopeRoot, relativePath) {
 
 /**
  * Failed check names and their notice blocks, built from the "findings"/"fix" fields. Mirrors
- * finding_blocks() in lint_changed.py. Both are empty for a document from an older image, whose
+ * finding_blocks() in multilint.py. Both are empty for a document from an older image, whose
  * checks carry counts only, so the caller can fall back to the marker lines.
  */
 function findingBlocks(document) {
@@ -207,13 +207,17 @@ function structuredNotice(relativePath, document, { names, blocks }) {
   let body = blocks.join("\n");
   const budget = MAX_OUTPUT_CHARS - header.length - footer.length - 4;
   if (body.length > budget) {
-    body = body.slice(0, Math.max(budget - 2, 0)).split("\n").slice(0, -1).join("\n") + "\n…";
+    // Drop only a trailing partial line, and only when there is a line break to cut at, so a single
+    // long first line is truncated rather than discarded (mirrors structured_notice() in multilint.py).
+    const cut = body.slice(0, Math.max(budget - 2, 0));
+    const lastBreak = cut.lastIndexOf("\n");
+    body = (lastBreak >= 0 ? cut.slice(0, lastBreak) : cut) + "\n…";
   }
   return [header, body, footer].filter(Boolean).join("\n\n");
 }
 
 export default {
-  id: "multilint-lint",
+  id: "multilint",
 
   async setup(ctx) {
     ctx.tool.hook("execute.after", async (event) => {
@@ -267,7 +271,7 @@ export default {
         (name) => !STRUCTURALLY_SKIPPED.has(name),
       );
       const failed = document.return_code !== 0;
-      // Mirrors config_warnings() in lint_changed.py: tolerant of a missing or malformed field,
+      // Mirrors config_warnings() in multilint.py: tolerant of a missing or malformed field,
       // and surfaced independent of return_code -- a malformed .multilint.json is worth knowing
       // about even on an otherwise-clean run.
       const warnings = Array.isArray(document.warnings)
