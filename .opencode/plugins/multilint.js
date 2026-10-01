@@ -207,7 +207,11 @@ function structuredNotice(relativePath, document, { names, blocks }) {
   let body = blocks.join("\n");
   const budget = MAX_OUTPUT_CHARS - header.length - footer.length - 4;
   if (body.length > budget) {
-    body = body.slice(0, Math.max(budget - 2, 0)).split("\n").slice(0, -1).join("\n") + "\n…";
+    // Drop only a trailing partial line, and only when there is a line break to cut at, so a single
+    // long first line is truncated rather than discarded (mirrors structured_notice() in multilint.py).
+    const cut = body.slice(0, Math.max(budget - 2, 0));
+    const lastBreak = cut.lastIndexOf("\n");
+    body = (lastBreak >= 0 ? cut.slice(0, lastBreak) : cut) + "\n…";
   }
   return [header, body, footer].filter(Boolean).join("\n\n");
 }

@@ -612,7 +612,7 @@ def finding_blocks(document: dict) -> tuple[list[str], list[str]]:
     names: list[str] = []
     blocks: list[str] = []
     for name, check in (document.get("checks") or {}).items():
-        if isinstance(check, dict) and check.get("status") == "failed" and "findings" in check:
+        if isinstance(check, dict) and check.get("status") == "failed" and isinstance(check.get("findings"), list):
             names.append(name)
             blocks.append(check_block(name, check))
     return names, blocks
