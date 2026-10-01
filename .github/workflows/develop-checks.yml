@@ -7,10 +7,13 @@ name: Develop Checks
 # sit between a contributor and a review.
 #
 # Releases are unaffected — release-please still triggers on pushes to master.
+#
+# Also runs on pull requests into master: the master ruleset requires
+# "unit tests", and a required check that never starts blocks the merge.
 
 on:
   pull_request:
-    branches: ["develop"]
+    branches: ["develop", "master"]
   push:
     branches: ["develop"]
   workflow_dispatch:
