@@ -69,7 +69,7 @@ LINTABLE_SUFFIXES = {".sh", ".bash", ".py", ".md", ".yaml", ".yml", ".json", ".t
 
 # Published on Docker Hub, which serves anonymous pulls; ghcr.io carries the same tags but can
 # require a token. Override the "image" hook-setting to run a local build instead
-# (`python3 multilint.py --set image local/build:dev`).
+# (`python3 lint_changed.py --set image local/build:dev`).
 DEFAULT_IMAGE = "lehcode/multilint:latest"
 
 CONTAINER_LINT_SH = "/usr/local/bin/lint.sh"
@@ -158,7 +158,7 @@ def read_setting(key: str) -> str | None:
             return None
         message = f"could not read the {key!r} setting from {database}, using the default: {error}"
         SETTING_WARNINGS.append(message)
-        print(f"multilint.py: {message}", file=sys.stderr)
+        print(f"lint_changed.py: {message}", file=sys.stderr)
         return None
     return row[0] if row is not None else None
 
@@ -843,9 +843,9 @@ def run_settings_cli(argv: list[str]) -> int:
             unset_setting(rest[0])
             return 0
     except ValueError as error:
-        print(f"multilint.py: {error}", file=sys.stderr)
+        print(f"lint_changed.py: {error}", file=sys.stderr)
         return 1
-    print("multilint.py: usage: --set KEY VALUE | --get KEY | --unset KEY", file=sys.stderr)
+    print("lint_changed.py: usage: --set KEY VALUE | --get KEY | --unset KEY", file=sys.stderr)
     return 1
 
 
