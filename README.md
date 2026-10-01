@@ -125,44 +125,123 @@ Any tool failure increments the fail counter; benchmark fails if ≥1/3 tools fa
 
 ## Configuration
 
-### Thresholds (`.multilint.json`)
+`.multilint.json` is the single configuration surface for `lint.sh`. There is
+no environment-variable layer for any threshold, enablement flag, or tool
+option (user decision, 2026-09-30: environment variables are not a multilint
+configuration surface) — a setting is either a value in this file or the
+built-in default; nothing else participates.
 
-Per-check configurable thresholds in the target directory. Any key omitted defaults to `0` (zero tolerance):
+### Lookup order
+
+`lint.sh` resolves the config file as `$PWD/.multilint.json` first, falling
+back to `<target-dir>/.multilint.json` only when the target argument is a
+directory. A single-file target (the plugin invocation shape) never falls
+back to a directory-relative path — this is why both plugins set their
+working directory to the project's scope root before invoking `lint.sh`.
+
+### Schema
+
+Two forms per check, both accepted in the same file:
 
 ```json
 {
-  "bash_syntax": 0, "shellcheck": 0, "bashate": 0, "shfmt": 0,
-  "flake8": 0, "black": 0, "pylint": 0, "markdownlint": 0,
-  "yaml_prettier": 0, "json_prettier": 0, "toml_sort": 0,
-  "security_secrets": 0, "security_dangerous_patterns": 0,
-  "gitleaks": 0
+  "shellcheck": 0,
+  "checks": {
+    "flake8": { "enabled": true, "threshold": 2, "args": ["--max-line-length=100"] },
+    "pylint": { "enabled": false }
+  },
+  "gitleaks": { "depth": "all", "config": ".gitleaks.toml" },
+  "bandit": { "severity": "-lll" },
+  "mypy": { "cache_dir": "/tmp/.mypy_cache_project" }
 }
 ```
 
-A check passes if its failures ≤ threshold. Failures exceeding threshold are marked ⚠; otherwise ✓.
+- **Flat form**: `"<check>": <non-negative integer>` sets that check's
+  threshold. Valid for all 16 checks (`bash_syntax`, `shellcheck`, `bashate`,
+  `shfmt`, `flake8`, `black`, `pylint`, `mypy`, `bandit`, `markdownlint`,
+  `yaml_prettier`, `json_prettier`, `toml_sort`, `security_secrets`,
+  `security_dangerous_patterns`, `gitleaks`).
+- **Object form**: `"checks.<name>"` accepts `enabled` (boolean), `threshold`
+  (non-negative integer), and `args` (array of strings). If a check has both
+  a flat and an object threshold, `checks.<name>.threshold` wins and a
+  warning names the redundant flat key.
+- `gitleaks`, `bandit`, and `mypy` double as option-group keys, disambiguated
+  by JSON type: an integer is a flat threshold, an object carries
+  `gitleaks.depth`/`gitleaks.config`, `bandit.severity`, or `mypy.cache_dir`.
 
-### Feature Toggles
+Any key omitted resolves to its built-in default (threshold `0`, enablement
+`on`). A malformed file, an unrecognized key, or a wrongly typed value
+produces a warning — stderr in text mode, a top-level `"warnings"` array in
+JSON mode — and that single setting falls back to its default rather than
+silently reading as `0`.
 
-Disable individual checks via environment variables:
+A check passes if its failures are at or below its threshold; the process
+exit code and the JSON `return_code` are `1` if and only if at least one
+enabled check's failures exceed its threshold. Failures exceeding threshold
+are marked ⚠ in text output; otherwise ✓.
 
-| Variable | Effect |
-|----------|--------|
-| `MULTILINT_BLACK_CHECK=off` | Skip black formatting check |
-| `MULTILINT_SHFMT_CHECK=off` | Skip shfmt formatting check |
-| `MULTILINT_BASHATE_CHECK=off` | Skip bashate indentation check |
-| `MULTILINT_SECURITY_CHECK=off` | Skip security scanning |
-| `MULTILINT_GITLEAKS_CHECK=off` | Skip gitleaks scanning |
-| `MULTILINT_TOML_CHECK=off` | Skip TOML linting |
-| `MULTILINT_YAML_JSON_CHECK=off` | Skip YAML/JSON linting |
+### Every check can be disabled
 
-All enabled by default. Set to `"off"` to disable.
+`"checks": { "<name>": { "enabled": false } }` skips that check for any of
+the 16 checks — including `bash_syntax`, `shellcheck`, `flake8`, `pylint`,
+and `markdownlint`, which had no toggle before this schema. A disabled check
+reports `status: "skipped"`, distinct from a check that ran and found
+nothing.
 
-### Gitleaks Depth
+### `args` replaces built-in policy flags; harness flags are always kept
 
-| Variable | Effect |
-|----------|--------|
-| `MULTILINT_GITLEAKS_DEPTH=1` | Last commit only (default) |
-| `MULTILINT_GITLEAKS_DEPTH=all` | Full git history |
+Each tool-backed check's flags split into **harness flags** (what makes the
+invocation a non-writing, countable check at all — never affected by `args`)
+and **policy flags** (the tool's opinionated defaults, replaced wholesale by
+`checks.<name>.args` when present):
+
+| Check | Harness flags (always passed) | Default policy flags (`args` replaces these) |
+|---|---|---|
+| `bash_syntax` | `-n` | n/a — `args` unsupported |
+| `shellcheck` | none | `-e SC1091 -e SC2155 -e SC2086 -S style` |
+| `bashate` | none | `-i E006` |
+| `shfmt` | `-d` | `-i 4` |
+| `flake8` | none | `--max-line-length=120 --extend-ignore=E203,E111,E121,E124,BLK100` |
+| `black` | `--check` | `--line-length=120` |
+| `pylint` | `--output-format=text` | `--disable=C,R,E0401,E1123,W1510` |
+| `mypy` | `--cache-dir=<mypy.cache_dir>` `--no-error-summary` | `--ignore-missing-imports --follow-imports=silent` |
+| `bandit` | `-q <bandit.severity> -f custom --msg-template ...` | empty — severity is the `bandit.severity` option, not `args` |
+| `markdownlint` | none | `-c .markdownlint.json` when that file exists in `$PWD`, else empty |
+| `yaml_prettier` / `json_prettier` | `--check --log-level error` | empty |
+| `toml_sort` | `--check` | `--sort-keys` |
+| `security_secrets` / `security_dangerous_patterns` | grep pattern | n/a — `args` unsupported |
+| `gitleaks` | `detect`, `--source`/`--no-git --source`, config/depth flags, `--verbose --no-color --no-banner` | empty |
+
+`"args": []` runs the check with harness flags only and no policy flags,
+letting the tool's own configuration discovery from `$PWD` take over. `args`
+never removes a harness flag: `"checks": {"black": {"args": []}}` still runs
+`black --check`, so the check never rewrites the target file — it only drops
+`--line-length=120`. Some default policy flags are container-coupled rather
+than merely stylistic (`shfmt`'s `-i 4`, which is what keeps it from
+contradicting `bashate`; `mypy`'s import flags, because the image installs no
+project dependencies), so replacing them produces no runtime warning — that
+is a deliberate, self-announcing choice, not an oversight.
+
+### Host-plugin settings (`image`, `search_ceiling`)
+
+The Docker image both plugins run and the highest directory the Python hook
+may search for a project root are **not** `.multilint.json` keys — they
+configure the plugin process itself, not a check. They live in a small
+SQLite `settings` table instead, managed through a CLI mode in
+`claude-plugin/scripts/lint_changed.py`:
+
+```bash
+python3 claude-plugin/scripts/lint_changed.py --set image local/multilint:dev
+python3 claude-plugin/scripts/lint_changed.py --get image
+python3 claude-plugin/scripts/lint_changed.py --unset image
+python3 claude-plugin/scripts/lint_changed.py --set search_ceiling /home/user/projects
+```
+
+Only `image` and `search_ceiling` are accepted keys; any other key exits
+non-zero and writes nothing. A key with no stored setting falls back to its
+built-in default (`lehcode/multilint:latest` for `image`, the user's home
+directory for `search_ceiling`). The OpenCode plugin reads the same table
+read-only and never writes to it.
 
 ## Policies
 
@@ -311,9 +390,7 @@ When the multilint agent is selected, OpenCode loads `agents/multilint.md` as th
 
 ### Configuration
 
-| Env var | Default | Description |
-|---------|---------|-------------|
-| `MULTILINT_HOST` | `http://localhost:8591` | Multilint HTTP API base URL (plugin only) |
+The OpenCode plugin reads no environment variables. It runs the image named by the `image` setting (see "Host-plugin settings" above), else `lehcode/multilint:latest`, and lints with the project's `.multilint.json`.
 
 ### Limitations
 
@@ -329,4 +406,4 @@ When the multilint agent is selected, OpenCode loads `agents/multilint.md` as th
 
 **`pylint` passes a file you expect to fail** — only error-class messages are enabled. Run `pylint` directly for the full report.
 
-**Security checks fail on legitimate files** — hardcoded secrets detection excludes `server.py`, `mcp_server.py`, `test_*.py`, and `__init__.py`. Adjust thresholds in `.multilint.json` or disable with `MULTILINT_SECURITY_CHECK=off`.
+**Security checks fail on legitimate files** — hardcoded secrets detection excludes `server.py`, `mcp_server.py`, `test_*.py`, and `__init__.py`. Adjust thresholds in `.multilint.json`, or disable a check with `"checks": {"security_secrets": {"enabled": false}}` (or `security_dangerous_patterns`).
