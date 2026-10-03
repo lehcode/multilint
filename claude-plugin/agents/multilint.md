@@ -1,6 +1,6 @@
 ---
 name: multilint
-description: Runs code quality linting in a throwaway multilint container. Checks shell, Python, Markdown, YAML, JSON and TOML against configured thresholds. Use when asked about lint errors, formatting, code quality or secret scanning.
+description: Runs code quality linting in a throwaway multilint container, and changes multilint configuration. Checks shell, Python, Markdown, YAML, JSON and TOML against configured thresholds. Use when asked about lint errors, formatting, code quality or secret scanning, or to change multilint configuration - enable or disable a check (for example gitleaks), set a threshold, set args, set the image, show the configuration.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
@@ -80,25 +80,70 @@ silent fallback to zero: stderr in text mode, and a top-level `"warnings"` array
 means the project's own `.multilint.json` has a problem the user should fix, separate from any
 check's findings.
 
+## Configuration requests
+
+Any request to change or show multilint configuration (enable or disable a check, thresholds, args,
+option-group keys, image, search ceiling) is answered by running the config script, nothing else.
+Locate it first (the same shell session must run the commands below):
+
+```bash
+ML="${CLAUDE_PLUGIN_ROOT}/scripts/multilint_config.py"
+[ -f "$ML" ] || ML="$(python3 -c 'import glob,os;d=os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude");h=glob.glob(os.path.join(d,"plugins","cache","**","scripts","multilint_config.py"),recursive=True);print(max(h,key=os.path.getmtime) if h else "")')"
+[ -n "$ML" ] || { echo "multilint config tool not found" >&2; false; }
+```
+
+If that prints "multilint config tool not found", tell the user and stop.
+
+| User says | Command |
+| --- | --- |
+| disable / turn off a check (gitleaks included) | `python3 "$ML" disable gitleaks` |
+| enable a check | `python3 "$ML" enable <check>` |
+| allow N failures | `python3 "$ML" threshold <check> <N>` |
+| use these flags for a check | `python3 "$ML" args <check> <flag>...` |
+| harness flags only | `python3 "$ML" args <check>` |
+| back to default flags | `python3 "$ML" clear-args <check>` |
+| gitleaks history depth / config file | `python3 "$ML" option gitleaks depth all` or `1` / `option gitleaks config "<path>"` |
+| bandit severity | `python3 "$ML" option bandit severity -l` or `-ll` or `-lll` |
+| mypy cache dir | `python3 "$ML" option mypy cache_dir "<path>"` |
+| use image X / back to the default image | `python3 "$ML" image "X"` / `python3 "$ML" unset-image` |
+| search ceiling | `python3 "$ML" search-ceiling "<absolute path>"` / `python3 "$ML" unset-search-ceiling` |
+| show configuration | `python3 "$ML" show` |
+| another project | `python3 "$ML" --root "<dir>" <verb> ...` (`--root` goes first) |
+
+`gitleaks` means two things: "disable/enable gitleaks" is the check on/off edit (`disable gitleaks`,
+which sets `checks.gitleaks.enabled`); `depth` and `config` belong to the top-level `gitleaks`
+option group and use `option`. Quote values; a value may start with `-`.
+
+Rules:
+
+- Run the script for every configuration request.
+- Do not read sources, `lint.sh`, `lint_changed.py` or the settings database to answer one.
+- Do not set environment variables; they are not a configuration surface.
+- Never write `image` or `search_ceiling` into `.multilint.json`; they are plugin settings.
+- An explicit user request to change configuration is the approval the constraint below requires;
+  apply it without asking again.
+- A non-zero exit means the script refused: report its stderr to the user and do not edit
+  `.multilint.json` by hand. Relay every `warning:` line; it describes content `lint.sh` would warn
+  about or ignore.
+
 ## Changing image or search-ceiling settings
 
 `MULTILINT_IMAGE` and `MULTILINT_SEARCH_CEILING` are retired along with every other environment
 variable. The container image both plugins run, and the highest directory the Python hook may
-search for a project root, now live in a small SQLite `settings` table managed by
-`claude-plugin/scripts/lint_changed.py`'s CLI mode:
+search for a project root, now live in a small SQLite `settings` table. Change them with the config
+script's `image`, `unset-image`, `search-ceiling` and `unset-search-ceiling` verbs (see
+"Configuration requests"); the script delegates to `lint_changed.py --set/--unset`, the only writer
+of that table. For example:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --set image local/multilint:dev
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --get image
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --unset image
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --set search_ceiling /home/user/projects
+python3 "$ML" image local/multilint:dev
+python3 "$ML" search-ceiling /home/user/projects
 ```
 
-Only `image` and `search_ceiling` are accepted keys; anything else exits non-zero and writes
-nothing. A key with no stored setting falls back to its built-in default
-(`lehcode/multilint:latest` for `image`, the user's home directory for `search_ceiling`). If the
-user asks to change the image or the search ceiling, run `--set` with their value — do not add
-these two settings to `.multilint.json`, since they configure the plugin process, not a check.
+Only `image` and `search_ceiling` are settings; anything else exits non-zero and writes nothing. A
+setting that is not stored falls back to its built-in default (`lehcode/multilint:latest` for
+`image`, the user's home directory for `search_ceiling`). Do not add these two settings to
+`.multilint.json`, since they configure the plugin process, not a check.
 
 ## Reading the result
 
