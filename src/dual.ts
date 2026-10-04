@@ -73,11 +73,10 @@ async function setupV2(ctx: any) {
     if (event.status !== "completed") return
 
     const toolName = event.tool
-    const input = event.input as { filePath?: string }
+    const input = event.input as { path?: string; filePath?: string }
 
-    if (!input?.filePath) return
-
-    const file = input.filePath
+    const file = input?.path ?? input?.filePath
+    if (!file) return
     const lastDot = file.lastIndexOf(".")
     if (lastDot <= 0) return
 
@@ -134,10 +133,9 @@ async function serverV1() {
     "execute.after": async (event: any) => {
       if (event.status !== "completed") return
 
-      const input = event.input as { filePath?: string }
-      if (!input?.filePath) return
-
-      const file = input.filePath
+      const input = event.input as { path?: string; filePath?: string }
+      const file = input?.path ?? input?.filePath
+      if (!file) return
       const lastDot = file.lastIndexOf(".")
       if (lastDot <= 0) return
 
