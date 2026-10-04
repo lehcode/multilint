@@ -1,0 +1,6 @@
+title = "Multilint Test"
+version = "1.0"
+
+[config]
+shellcheck = true
+flake8 = true
