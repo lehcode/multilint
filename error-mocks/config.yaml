@@ -1,0 +1,6 @@
+name: multilint-test
+version: "1.0"
+config:
+  shellcheck: true
+  markdownlint: true
+  flake8: true
