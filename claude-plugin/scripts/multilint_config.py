@@ -3,10 +3,10 @@
 
 Usage: multilint_config.py [--root DIR] VERB [OPERAND...]   (see --help)
 
-Docker-free and stdlib-only. The validation constants below are verbatim copies of the ML_CONFIG_PY
+Stdlib-only. The validation constants below are verbatim copies of the ML_CONFIG_PY
 heredoc in lint.sh, which stays authoritative at lint time; tests/unit/test_multilint_config.py
 fails when the two diverge. This tool only prevents writing input that lint.sh would warn about or
-ignore. The `image` and `search_ceiling` settings are not configuration keys: they are delegated to
+ignore. The `search_ceiling` setting is not a configuration key: it is delegated to
 lint_changed.py (--set/--get/--unset), the only writer of the settings database. Environment
 variables are never read or set as a configuration channel.
 
@@ -56,7 +56,7 @@ OPTION_CHOICES = {
     ("gitleaks", "depth"): ("all", "1"),
     ("bandit", "severity"): ("-l", "-ll", "-lll"),
 }
-SETTING_NAMES = ("image", "search_ceiling")
+SETTING_NAMES = ("search_ceiling",)
 CONFIG_NAME = ".multilint.json"
 MAX_BYTES = 1024 * 1024
 PROG = "multilint_config.py"
@@ -71,7 +71,6 @@ usage: multilint_config.py [--root DIR] VERB [OPERAND...]
   args CHECK [ARG...]            checks.CHECK.args = [ARG...] (no ARG: [], harness flags only)
   clear-args CHECK               remove checks.CHECK.args
   option GROUP KEY VALUE         GROUP.KEY = VALUE (gitleaks depth|config, bandit severity, mypy cache_dir)
-  image VALUE | unset-image      container image setting (lint_changed.py, not .multilint.json)
   search-ceiling PATH | unset-search-ceiling
                                  search ceiling setting (lint_changed.py, not .multilint.json)
 
@@ -408,8 +407,6 @@ EDITS = {
 
 # verb -> (operand usage, operand count, lint_changed.py argv prefix)
 SETTINGS = {
-    "image": ("VALUE", 1, ["--set", "image"]),
-    "unset-image": ("", 0, ["--unset", "image"]),
     "search-ceiling": ("PATH", 1, ["--set", "search_ceiling"]),
     "unset-search-ceiling": ("", 0, ["--unset", "search_ceiling"]),
 }
