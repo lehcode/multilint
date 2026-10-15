@@ -6,8 +6,10 @@ invocation can be asserted on a machine with no Docker and no image, which is wh
 
 # pylint: disable=redefined-outer-name,protected-access
 import importlib.util
+import io
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -669,3 +671,132 @@ class TestFindingsNotice:
             "  F401 a.py:1  'os' imported but unused\n\n"
             "Rules: F401"
         )
+
+
+REPO_ROOT = Path(__file__).parent.parent.parent
+
+
+def _git_repo(tmp_path):
+    """A real repository under tmp_path, which is also the search ceiling."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    return repo
+
+
+def _drive_hook(hook, monkeypatch, tmp_path, payload, run_lint_result=()):
+    """Run main() on a payload with run_lint stubbed; return (exit code, run_lint calls, stdout).
+
+    Isolates the state database and the search ceiling to tmp_path, so nothing reads or writes the
+    user's real ~/.local/state/multilint.
+    """
+    calls = []
+
+    def stub_run_lint(scope_root, relative_paths):
+        calls.append((scope_root, list(relative_paths)))
+        return list(run_lint_result)
+
+    monkeypatch.setattr(hook, "state_dir", lambda: tmp_path / "state")
+    _set_ceiling(monkeypatch, hook, tmp_path)
+    monkeypatch.setattr(hook, "run_lint", stub_run_lint)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    stdout = io.StringIO()
+    monkeypatch.setattr("sys.stdout", stdout)
+    return hook.main(), calls, stdout.getvalue()
+
+
+class TestEveryLintableTypeReachesLint:
+    """A Write or Edit of every supported type inside a repository reaches the linter.
+
+    The user could confirm only Markdown as auto-linted. These cases pin the host side of the
+    contract: every suffix in LINTABLE_SUFFIXES, from either tool, tracked or not, produces exactly
+    one run_lint call scoped to the repository root with the repo-relative path.
+    """
+
+    @pytest.mark.parametrize("tracked", (False, True), ids=("untracked", "tracked"))
+    @pytest.mark.parametrize("tool_name", ("Write", "Edit"))
+    @pytest.mark.parametrize("suffix", sorted(_load_module().LINTABLE_SUFFIXES))
+    def test_reaches_run_lint(self, hook, tmp_path, monkeypatch, suffix, tool_name, tracked):
+        repo = _git_repo(tmp_path)
+        relative = f"src/sample{suffix}"
+        (repo / "src").mkdir()
+        (repo / relative).write_text("content\n", encoding="utf-8")
+        if tracked:
+            subprocess.run(["git", "add", relative], cwd=repo, check=True)
+        payload = {"tool_name": tool_name, "cwd": str(repo), "tool_input": {"file_path": str(repo / relative)}}
+
+        code, calls, _out = _drive_hook(hook, monkeypatch, tmp_path, payload)
+
+        assert code == 0
+        assert calls == [(repo.resolve(), [relative])]
+
+    def test_relative_file_path_resolves_against_cwd(self, hook, tmp_path, monkeypatch):
+        repo = _git_repo(tmp_path)
+        (repo / "src").mkdir()
+        (repo / "src" / "sample.py").write_text("content\n", encoding="utf-8")
+        payload = {"tool_name": "Write", "cwd": str(repo), "tool_input": {"file_path": "src/sample.py"}}
+
+        _code, calls, _out = _drive_hook(hook, monkeypatch, tmp_path, payload)
+
+        assert calls == [(repo.resolve(), ["src/sample.py"])]
+
+    @pytest.mark.parametrize("name", ("src/sample.ts", "Dockerfile", "src/sample.txt"))
+    def test_unsupported_type_is_not_linted(self, hook, tmp_path, monkeypatch, name):
+        """Documents the current contract: anything outside LINTABLE_SUFFIXES is ignored silently."""
+        repo = _git_repo(tmp_path)
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text("content\n", encoding="utf-8")
+        payload = {"tool_name": "Write", "cwd": str(repo), "tool_input": {"file_path": str(repo / name)}}
+
+        code, calls, out = _drive_hook(hook, monkeypatch, tmp_path, payload)
+
+        assert (code, calls, out) == (0, [], "")
+
+    def test_failing_result_reaches_claude(self, hook, tmp_path, monkeypatch):
+        """A failed check comes back as additionalContext naming the check and the rule."""
+        repo = _git_repo(tmp_path)
+        (repo / "sample.md").write_text("# T  \n", encoding="utf-8")
+        document = {
+            "return_code": 1,
+            "checks": {
+                "markdownlint": {
+                    "status": "failed",
+                    "failed": 1,
+                    "findings": [{"rule": "MD009", "file": "sample.md", "line": 1, "message": "Trailing spaces"}],
+                }
+            },
+            "summary": {"rules_violated": ["MD009"]},
+        }
+        payload = {"tool_name": "Edit", "cwd": str(repo), "tool_input": {"file_path": str(repo / "sample.md")}}
+
+        _code, _calls, out = _drive_hook(hook, monkeypatch, tmp_path, payload, [("sample.md", document, "")])
+
+        context = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert "markdownlint" in context
+        assert "MD009" in context
+
+
+class TestLintableTypesMatchLintSh:
+    """The hook's suffix list and lint.sh's find patterns must agree.
+
+    A type lint.sh learns to lint but the hook filters out is never linted on edit; a type the hook
+    forwards but lint.sh never finds is reported as clean. Either drift is silent without this guard.
+    """
+
+    def test_suffixes_match_lint_sh_find_patterns(self, hook):
+        patterns = re.findall(r"-name '\*(\.\w+)'", (REPO_ROOT / "lint.sh").read_text(encoding="utf-8"))
+        assert set(patterns) == hook.LINTABLE_SUFFIXES
+
+
+class TestHookWiring:
+    """hooks.json -> multilint.sh -> lint_changed.py: a break anywhere means no edit is linted."""
+
+    def test_post_tool_use_matches_write_and_edit(self):
+        hooks = json.loads((REPO_ROOT / "claude-plugin" / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        entry = hooks["hooks"]["PostToolUse"][0]
+        assert {"Write", "Edit"} <= set(entry["matcher"].split("|"))
+        assert entry["hooks"][0]["command"].endswith('/scripts/multilint.sh"')
+
+    def test_entrypoint_execs_hook_body(self):
+        script = (REPO_ROOT / "claude-plugin" / "scripts" / "multilint.sh").read_text(encoding="utf-8")
+        assert 'exec python3 "$(dirname -- "$0")/lint_changed.py"' in script
