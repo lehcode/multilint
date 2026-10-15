@@ -1,6 +1,7 @@
 """Unit tests for lint.sh file discovery and exit code logic."""
 
 # pylint: disable=redefined-outer-name
+import json
 import os
 import shutil
 import subprocess
@@ -82,6 +83,40 @@ class TestFileDiscovery:
         )
         assert "valid.md" in result.stdout
         assert "broken.md" in result.stdout
+
+    @pytest.mark.parametrize(
+        "relative",
+        ["sub/.hidden/notes.md", "src/tests/run.sh", "pkg/test/check.py", "node_modules/pkg/README.md"],
+    )
+    def test_single_file_target_ignores_walk_exclusions(self, tmp_path, relative):
+        """A file passed as the target is linted even inside a directory the walk excludes.
+
+        Both editor hooks pass exactly the edited file. Applying the directory-walk exclusions to it
+        dropped the file, and the run reported success having checked nothing.
+        """
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True)
+        target.write_text("\n", encoding="utf-8")
+        result = subprocess.run(
+            ["bash", str(LINT_SH), relative, "--format", "json"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+        )
+        assert json.loads(result.stdout)["files"] == [relative]
+
+    def test_directory_walk_still_applies_exclusions(self, tmp_path):
+        """Only an explicitly named file bypasses the exclusions; a directory scan keeps them."""
+        (tmp_path / "src" / "tests").mkdir(parents=True)
+        (tmp_path / "src" / "tests" / "run.sh").write_text("\n", encoding="utf-8")
+        (tmp_path / "src" / "main.sh").write_text("\n", encoding="utf-8")
+        result = subprocess.run(
+            ["bash", str(LINT_SH), "src", "--format", "json"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+        )
+        assert json.loads(result.stdout)["files"] == ["src/main.sh"]
 
 
 class TestExitCodes:

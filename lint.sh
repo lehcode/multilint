@@ -577,12 +577,56 @@ check_enabled() {
     [ "${!v}" != "off" ]
 }
 
+# ml_files NAME_GLOB... -- EXCLUDE_PATH_GLOB...
+# Lists the files under TARGET_DIR whose basename matches one of the NAME_GLOBs.
+#
+# The exclusions apply to directory walks only. A file named as TARGET_DIR was
+# chosen explicitly -- both editor hooks pass exactly the edited file -- so it is
+# listed whenever its name matches, wherever it lives. Applying the walk
+# exclusions to it made `find` drop `.github/x/ci.yml`, `src/tests/run.sh` or
+# `pkg/test/t.py` and the run reported success having linted nothing.
+ml_files() {
+    local names=() excludes=() in_excludes=0 arg
+    for arg in "$@"; do
+        if [ "$arg" = "--" ]; then
+            in_excludes=1
+        elif [ "$in_excludes" -eq 0 ]; then
+            names+=("$arg")
+        else
+            excludes+=("$arg")
+        fi
+    done
+
+    if [ -f "$TARGET_DIR" ]; then
+        local base
+        base="$(basename -- "$TARGET_DIR")"
+        for arg in "${names[@]}"; do
+            # shellcheck disable=SC2053  # unquoted on purpose: a glob match
+            if [[ "$base" == $arg ]]; then
+                printf '%s\n' "$TARGET_DIR"
+                return 0
+            fi
+        done
+        return 0
+    fi
+
+    local expr=() filters=()
+    for arg in "${names[@]}"; do
+        [ ${#expr[@]} -gt 0 ] && expr+=(-o)
+        expr+=(-name "$arg")
+    done
+    for arg in "${excludes[@]}"; do
+        filters+=(! -path "$arg")
+    done
+    find "$TARGET_DIR" -type f \( "${expr[@]}" \) "${filters[@]}" 2>/dev/null
+}
+
 # ---------------------------------------------------------------------------
 # Shell scripts
 # ---------------------------------------------------------------------------
 info "Linting shell scripts..."
 
-mapfile -t shell_files < <(find "$TARGET_DIR" -type f \( -name '*.sh' -o -name '*.bash' \) ! -path '*/\.*' ! -path '*/tests/*' ! -path '*/test/*' ! -path '*/venv/*' ! -path '*/node_modules/*' 2>/dev/null)
+mapfile -t shell_files < <(ml_files '*.sh' '*.bash' -- '*/\.*' '*/tests/*' '*/test/*' '*/venv/*' '*/node_modules/*')
 
 if [ ${#shell_files[@]} -eq 0 ]; then
     echo "  (none found)"
@@ -722,7 +766,7 @@ done
 # ---------------------------------------------------------------------------
 info "Linting Python scripts..."
 
-mapfile -t py_files < <(find "$TARGET_DIR" -type f -name '*.py' ! -path '*/\.*' ! -path '*/test/*' ! -path '*/__pycache__/*' ! -path '*/venv/*' ! -path '*/node_modules/*' ! -path '*/fixtures/*' 2>/dev/null)
+mapfile -t py_files < <(ml_files '*.py' -- '*/\.*' '*/test/*' '*/__pycache__/*' '*/venv/*' '*/node_modules/*' '*/fixtures/*')
 
 if [ ${#py_files[@]} -eq 0 ]; then
     echo "  (none found)"
@@ -886,7 +930,7 @@ done
 # ---------------------------------------------------------------------------
 info "Linting Markdown files..."
 
-mapfile -t md_files < <(find "$TARGET_DIR" -type f -name '*.md' ! -path '*/\.*' ! -path '*/node_modules/*' ! -path '*/cache/*' ! -path '*/output/*' 2>/dev/null)
+mapfile -t md_files < <(ml_files '*.md' -- '*/\.*' '*/node_modules/*' '*/cache/*' '*/output/*')
 
 if [ ${#md_files[@]} -eq 0 ]; then
     echo "  (none found)"
@@ -953,8 +997,8 @@ done
 # ---------------------------------------------------------------------------
 info "Linting YAML and JSON files..."
 
-mapfile -t yaml_files < <(find "$TARGET_DIR" -type f \( -name '*.yaml' -o -name '*.yml' \) ! -path '*/\.*' ! -path '*/venv/*' ! -path '*/node_modules/*' ! -path '*/__pycache__/*' 2>/dev/null)
-mapfile -t json_files < <(find "$TARGET_DIR" -type f -name '*.json' ! -path '*/\.*' ! -path '*/node_modules/*' ! -path '*/venv/*' ! -path '*/__pycache__/*' 2>/dev/null)
+mapfile -t yaml_files < <(ml_files '*.yaml' '*.yml' -- '*/\.*' '*/venv/*' '*/node_modules/*' '*/__pycache__/*')
+mapfile -t json_files < <(ml_files '*.json' -- '*/\.*' '*/node_modules/*' '*/venv/*' '*/__pycache__/*')
 
 if [ ${#yaml_files[@]} -eq 0 ] && [ ${#json_files[@]} -eq 0 ]; then
     echo "  (none found)"
@@ -1042,7 +1086,7 @@ done
 # ---------------------------------------------------------------------------
 info "Linting TOML files..."
 
-mapfile -t toml_files < <(find "$TARGET_DIR" -type f -name '*.toml' ! -path '*/\.*' ! -path '*/venv/*' ! -path '*/node_modules/*' ! -path '*/__pycache__/*' 2>/dev/null)
+mapfile -t toml_files < <(ml_files '*.toml' -- '*/\.*' '*/venv/*' '*/node_modules/*' '*/__pycache__/*')
 
 if [ ${#toml_files[@]} -eq 0 ]; then
     echo "  (none found)"
