@@ -784,8 +784,11 @@ class TestLintableTypesMatchLintSh:
     """
 
     def test_suffixes_match_lint_sh_find_patterns(self, hook):
-        patterns = re.findall(r"-name '\*(\.\w+)'", (REPO_ROOT / "lint.sh").read_text(encoding="utf-8"))
-        assert set(patterns) == hook.LINTABLE_SUFFIXES
+        text = (REPO_ROOT / "lint.sh").read_text(encoding="utf-8")
+        calls = re.findall(r"< <\(ml_files ((?:'[^']+' )+)--", text)
+        patterns = {suffix for call in calls for suffix in re.findall(r"'\*(\.\w+)'", call)}
+        assert calls, "no ml_files calls found in lint.sh; update this guard with the file selection"
+        assert patterns == hook.LINTABLE_SUFFIXES
 
 
 class TestHookWiring:

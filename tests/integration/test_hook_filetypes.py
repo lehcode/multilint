@@ -196,58 +196,26 @@ def test_clean_file(suffix, content, repo, hook_env):
 
 
 # ---------------------------------------------------------------------------
-# xfail cases: lint.sh find exclusions prevent findings from surfacing
+# Files inside directories that lint.sh's directory walk excludes
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="lint.sh find excludes '*/.*' — defective yaml in dot-dir not linted"
+@pytest.mark.parametrize(
+    "relative,content,expected_check",
+    [
+        pytest.param("sub/.hidden/bad.yaml", _DEFECTIVE_YAML, "yaml_prettier", id="dot-dir"),
+        pytest.param("src/tests/bad.sh", _DEFECTIVE_SH, "shellcheck", id="tests-dir"),
+        pytest.param("pkg/test/bad.py", _DEFECTIVE_PY, "flake8", id="test-dir"),
+    ],
 )
-def test_excluded_hidden_yaml(repo, hook_env):
-    """Defective YAML inside a hidden directory should be excluded by lint.sh find.
+def test_edited_file_in_walk_excluded_directory_is_linted(relative, content, expected_check, repo, hook_env):
+    """The walk exclusions (dot-dirs, tests/, test/) must not apply to the file the hook names.
 
-    Currently no failure notice is produced, so this test is expected to fail (xfail).
+    Before ml_files, `find` dropped these single-file targets and the hook reported nothing, which
+    reads exactly like a clean file.
     """
-    rel = "sub/.hidden/bad.yaml"
-    (repo / rel).parent.mkdir(parents=True)
-    (repo / rel).write_text(_DEFECTIVE_YAML, encoding="utf-8")
-    result = run_hook(repo, rel, hook_env)
-    assert result is not None
-    ctx = result["hookSpecificOutput"]["additionalContext"]
-    assert "yaml_prettier" in ctx
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="lint.sh find excludes '*/tests/*' — defective shell in tests/ not linted",
-)
-def test_excluded_tests_shell(repo, hook_env):
-    """Defective shell inside src/tests/ should be excluded by lint.sh find.
-
-    Currently no failure notice is produced, so this test is expected to fail (xfail).
-    """
-    rel = "src/tests/bad.sh"
-    (repo / rel).parent.mkdir(parents=True)
-    (repo / rel).write_text(_DEFECTIVE_SH, encoding="utf-8")
-    result = run_hook(repo, rel, hook_env)
-    assert result is not None
-    ctx = result["hookSpecificOutput"]["additionalContext"]
-    assert "shellcheck" in ctx
-
-
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="lint.sh find excludes '*/test/*' — defective py in test/ not linted"
-)
-def test_excluded_test_py(repo, hook_env):
-    """Defective Python inside pkg/test/ should be excluded by lint.sh find.
-
-    Currently no failure notice is produced, so this test is expected to fail (xfail).
-    """
-    rel = "pkg/test/bad.py"
-    (repo / rel).parent.mkdir(parents=True)
-    (repo / rel).write_text(_DEFECTIVE_PY, encoding="utf-8")
-    result = run_hook(repo, rel, hook_env)
-    assert result is not None
-    ctx = result["hookSpecificOutput"]["additionalContext"]
-    assert "flake8" in ctx
+    (repo / relative).parent.mkdir(parents=True)
+    (repo / relative).write_text(content, encoding="utf-8")
+    result = run_hook(repo, relative, hook_env)
+    assert result is not None, f"hook produced no notice for {relative}"
+    assert expected_check in result["hookSpecificOutput"]["additionalContext"]
