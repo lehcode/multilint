@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
-"""PostToolUse hook body: lint the files that actually changed, in a throwaway container.
+"""PostToolUse hook body: lint the files that actually changed on the host.
 
-Reads the hook payload on stdin, works out which files changed, runs them through one ephemeral
-`docker run`, and reports failing or skipped checks back to Claude.
-
-There is no host-to-container path translation, because the bind mount is an identity mount:
-`source=<scope root>,target=<scope root>`. The host path and the container path are the same string,
-so there is nothing to map and nothing to get wrong. The previous design posted host paths to an
-HTTP API listening on a fixed port with fixed mounts, which meant a project in an unmounted
-directory was silently reported as clean, and N agents in N directories could not be served at all.
+Reads the hook payload on stdin, works out which files changed, runs them through the lint.sh script
+on the host system, and reports failing or skipped checks back to Claude.
 
 Scope root is the enclosing git repository when there is one, otherwise the edited file's directory.
-It is the only thing mounted, read-only.
-
-One container per hook invocation, not per file: container startup is ~0.36s over a warm in-process
-call, so a ten-file changeset amortises it once (measured 6.35s) instead of ten times (8.05s).
+This is the working directory in which lint.sh is invoked.
 
 The target is the file the hook reported, and only that file. An earlier version collected every
 dirty and untracked file in the repository and linted up to 25 of them per edit, which meant one
@@ -28,7 +19,7 @@ Cached roots are re-stat'ed before use: `git init`, `rm -rf .git` and a clone al
 and a stale cache would serve a wrong one.
 
 The repository search stops at $HOME. Unbounded, it reaches `/`, and since the scope root is what
-gets bind-mounted, an edit to a file in a system directory mounted that directory.
+gets mounted, an edit to a file in a system directory mounted that directory.
 
 The database deliberately lives outside ~/.claude/. Writes under ~/.claude/plugins/data/ raise the
 protected-directory permission prompt even under bypassPermissions
@@ -38,8 +29,11 @@ that path is per-conversation (issue #51398).
 POSIX only. WSL counts and needs nothing extra; native Windows is not a target, so `os.getuid()` is
 called directly rather than guarded.
 
-Always exits 0. A missing `docker`, an unreadable payload or an empty changeset is a silent no-op,
+Always exits 0. A missing lint.sh, an unreadable payload or an empty changeset is a silent no-op,
 matching the non-blocking behaviour of the OpenCode plugin.
+
+Linters come from the host PATH. A missing linter is reported by lint.sh as a skipped check, and
+the hook surfaces skipped checks to Claude, so a missing tool is never a silent pass.
 """
 
 # Required, not stylistic. This module runs on the *host* interpreter, which the
@@ -63,35 +57,23 @@ LINTABLE_SUFFIXES = {".sh", ".bash", ".py", ".md", ".yaml", ".yml", ".json", ".t
 # SKIP_DIRS, MAX_SCAN_FILES and MAX_LINT_TARGETS used to live here. They existed to make a tree walk
 # survivable: the hook collected every dirty and untracked file in the repository, pruned the
 # directories it knew to be uninteresting, hashed up to 2000 of them, and capped the result at 25 per
-# container. All three are gone with the walk. The hook receives one file_path per invocation, so a
+# run. All three are gone with the walk. The hook receives one file_path per invocation, so a
 # 2000-file "changed set" never described 2000 simultaneous saves — it described a dirty repository —
 # and a cap on a list that can only hold one element is not a guard.
 
-# Published on Docker Hub, which serves anonymous pulls; ghcr.io carries the same tags but can
-# require a token. Override the "image" hook-setting to run a local build instead
-# (`python3 lint_changed.py --set image local/build:dev`).
-DEFAULT_IMAGE = "lehcode/multilint:latest"
+# Wall-clock ceiling for the whole run, not per file. The hook runs lint.sh on the host.
+RUN_TIMEOUT_SECONDS = 120
 
-CONTAINER_LINT_SH = "/usr/local/bin/lint.sh"
-
-# Wall-clock ceiling for the whole container, not per file. Generous because a first pull has to
-# fetch ~506MB, and a timeout here means the edit is reported as unchecked rather than clean.
-RUN_TIMEOUT_SECONDS = 300
-
-# Resource caps mirroring docker-compose.yml, so the hook cannot starve the machine it runs on.
-MEMORY_LIMIT = "2g"
-CPU_LIMIT = "2"
-
-# Separator printed to stdout before each file's JSON document, so one container run producing N
+# Separator printed to stdout before each file's JSON document, so one run producing N
 # documents can be split back apart. Chosen to be something no linter emits.
 FILE_MARKER = "===MULTILINT-FILE==="
 
-# The two host-plugin settings that are not linter configuration -- they shape how the plugin runs,
-# not what a check does -- live in a `settings` table inside the same state database, written only
-# through this CLI (`--set`/`--get`/`--unset`) and read read-only by the OpenCode plugin. Environment
-# variables are not a multilint configuration surface (user decision, 2026-09-30); MULTILINT_IMAGE,
+# The host-plugin setting that shapes how the plugin runs, not what a check does -- lives in a
+# `settings` table inside the same state database, written only through this CLI
+# (`--set`/`--get`/`--unset`) and read read-only by the OpenCode plugin. Environment variables are
+# not a multilint configuration surface (user decision, 2026-09-30); MULTILINT_IMAGE,
 # MULTILINT_SEARCH_CEILING and MULTILINT_STATE_DIR are retired with no environment replacement.
-SETTINGS_KEYS = ("image", "search_ceiling")
+SETTINGS_KEYS = ("search_ceiling",)
 
 # Nothing is filtered out of the skipped set any more. gitleaks used to be listed here because
 # lint.sh gated it on "$TARGET_DIR/.git" and a single-file target can never satisfy that, so it was
@@ -139,8 +121,7 @@ def read_setting(key: str) -> str | None:
 
     A missing database, table or row is the ordinary "nothing set" answer and stays silent. Any
     other failure (still locked after the timeout, corrupt file, unreadable) also falls back to the
-    built-in default, but says so on stderr and in SETTING_WARNINGS: silently linting with the
-    default image would report on a different toolchain than the one configured.
+    built-in default, but says so on stderr and in SETTING_WARNINGS.
     """
     database = state_dir() / "changes.db"
     if not database.exists():
@@ -198,25 +179,24 @@ def unset_setting(key: str) -> None:
         connection.close()
 
 
-def resolve_image() -> str:
-    """Image to run. The "image" hook-setting overrides the published default."""
-    return read_setting("image") or DEFAULT_IMAGE
+def lint_program() -> str:
+    """The bash program run on the host.
 
-
-def container_program() -> str:
-    """The bash program run inside the container.
-
-    One lint.sh per file, in one container. lint.sh takes a single target and has no multi-target
-    mode, and adding one would change a script the image, the MCP server and the HTTP API all share.
+    One lint.sh invocation per file. lint.sh takes a single target and has no multi-target mode.
 
     Each document is preceded by a marker line so the combined stdout can be split back into one
     result per file. In JSON mode lint.sh sends human-readable output to stderr and only JSON to
     stdout, so stdout stays parsable.
 
+    The path to lint.sh is passed as the first positional argument, so `$1` is the lint.sh script
+    and `$@` (shifted past the script) are the file targets.
+
     `|| rc=1` rather than `set -e`: a failing file must not stop the remaining files from being
     checked, but the overall exit status should still reflect that something failed.
     """
     return (
+        'lint_sh="$1"\n'
+        "shift\n"
         "rc=0\n"
         'for f in "$@"; do\n'
         f'    printf "%s%s\\n" "{FILE_MARKER}" "$f"\n'
@@ -224,55 +204,15 @@ def container_program() -> str:
         # mode. Without a marker there, the detail for N files arrives as one undivided blob and
         # cannot be attributed to the file it belongs to.
         f'    printf "%s%s\\n" "{FILE_MARKER}" "$f" >&2\n'
-        f'    bash {CONTAINER_LINT_SH} "$f" --format json || rc=1\n'
+        f'    bash "$lint_sh" "$f" --format json || rc=1\n'
         "done\n"
         "exit $rc\n"
     )
 
 
-def build_docker_argv(scope_root: Path, relative_paths: list[str], image: str | None = None) -> list[str]:
-    """Assemble the full `docker run` argv.
-
-    Kept free of side effects so tests can assert on the exact arguments without Docker present.
-
-    The mount is an identity mount — source and target are the same absolute path — which is the
-    whole point of this design: the container sees the file at the path the host calls it, so no
-    translation table exists to be wrong or out of date.
-
-    `--mount` rather than `-v`: the `-v src:dst:opts` form is colon-delimited, and in zsh
-    `"$PWD:$PWD:ro"` silently becomes `.../multilint:.../multilinto`, because `:r` is a parameter
-    modifier that applies even inside double quotes. That produced a container mounted read-write at
-    the wrong target, an empty working directory, and a lint run that reported success having
-    examined nothing. --mount takes named keys and cannot be misread that way.
-    """
-    root = str(scope_root)
-    argv = [
-        "docker",
-        "run",
-        "--rm",
-        # No linter needs the network. gitleaks reads local history; every other tool reads files.
-        "--network",
-        "none",
-        "--memory",
-        MEMORY_LIMIT,
-        "--cpus",
-        CPU_LIMIT,
-        "--mount",
-        f"type=bind,source={root},target={root},readonly",
-        "--workdir",
-        root,
-        # lint.sh resolves .multilint.json and .markdownlint.json relative to the working directory,
-        # so the scope root has to be the working directory for per-project config to apply.
-        "--entrypoint",
-        "bash",
-        # Run as the invoking user so nothing in the container acts as root, whatever USER the image
-        # declares. POSIX only, which includes WSL; native Windows is not a target.
-        "--user",
-        f"{os.getuid()}:{os.getgid()}",
-    ]
-    argv += [image or resolve_image(), "-c", container_program(), "_"]
-    argv += relative_paths
-    return argv
+def _lint_sh_path() -> Path:
+    """Path to the lint.sh script in the same directory as this module."""
+    return Path(__file__).resolve().parent / "lint.sh"
 
 
 def edited_file_from_payload(payload: dict) -> Path | None:
@@ -304,8 +244,8 @@ def find_git_root(start: Path) -> Path | None:
     """Nearest ancestor containing a .git entry, searching no higher than $HOME.
 
     The bound is the point of this function. An unbounded walk reaches `/`, and because the scope
-    root is what gets bind-mounted into the lint container, an edit to a file sitting directly in a
-    system directory made that directory the mount. That is not hypothetical: the state database
+    root is the working directory for lint.sh, an edit to a file sitting directly in a system
+    directory would make that directory the scope root. That is not hypothetical: the state database
     accumulated a full recursive walk of /etc, which can only happen if /etc became the scope root.
 
     A path outside the ceiling has no ancestors worth searching, so None is returned without a
@@ -381,8 +321,8 @@ def open_state() -> sqlite3.Connection | None:
             "CREATE TABLE IF NOT EXISTS folders ("
             "folder TEXT PRIMARY KEY, git_root TEXT, resolved_at TEXT, last_used_at TEXT)"
         )
-        # Host-plugin settings (image, search_ceiling) that replaced MULTILINT_IMAGE and
-        # MULTILINT_SEARCH_CEILING. Same database, same migration, so there is one file and one lock.
+        # Host-plugin settings (search_ceiling) that replaced MULTILINT_SEARCH_CEILING.
+        # Same database, same migration, so there is one file and one lock.
         connection.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
         connection.commit()
     except sqlite3.Error:
@@ -514,21 +454,23 @@ def split_stream(text: str) -> dict[str, str]:
 
 
 def run_lint(scope_root: Path, relative_paths: list[str]) -> list[tuple[str, dict, str]]:
-    """Run one container over every changed file.
+    """Run lint.sh over every changed file on the host.
 
     Returns (file, JSON document, human-readable detail) per file. A document that will not parse is
     dropped rather than guessed at, on the principle that a malformed result should look like
     "nothing to report" and not like a finding.
 
-    An empty list means nothing could be determined — no Docker, no image, a timeout — and is
+    An empty list means nothing could be determined — no lint.sh, no bash, a timeout — and is
     deliberately indistinguishable from "no findings" to the caller, because the hook must never
     block an edit on infrastructure trouble.
     """
-    if shutil.which("docker") is None:
+    lint_sh = _lint_sh_path()
+    if not lint_sh.exists() or shutil.which("bash") is None:
         return []
     try:
         proc = subprocess.run(
-            build_docker_argv(scope_root, relative_paths),
+            ["bash", "-c", lint_program(), "_", str(lint_sh)] + relative_paths,
+            cwd=scope_root,
             capture_output=True,
             text=True,
             check=False,
@@ -606,7 +548,7 @@ def check_block(name: str, check: dict) -> str:
 def finding_blocks(document: dict) -> tuple[list[str], list[str]]:
     """(failed check names, notice blocks) built from the "findings"/"fix" fields.
 
-    Both are empty for a document from an older image, whose checks carry counts only, so the caller can
+    Both are empty for a document from an older lint.sh, whose checks carry counts only, so the caller can
     fall back to the marker lines.
     """
     names: list[str] = []
@@ -670,8 +612,8 @@ def changed_scope_root(edited: Path) -> Path | None:
 
         # Scope root is the repository when there is one, because lint.sh resolves .markdownlint.json
         # against the working directory and gitleaks needs .git to scan history. Outside a repository
-        # it is the file's own directory, which is as narrow as the mount can be while still letting
-        # the container see the file.
+        # it is the file's own directory, which is as narrow as the working directory can be while
+        # still letting lint.sh see the file.
         scope_root = git_root if git_root is not None else edited.parent
 
         if not record_and_check(state, edited, git_root):
@@ -688,7 +630,7 @@ def summarize_results(results: list) -> tuple[list[str], set[str], list[str], in
     """Fold per-file lint results into (findings, skipped checks, config warnings, failed count).
 
     A document that carries structured findings contributes its rendered check blocks; one from an older
-    image falls back to the marker lines of the human report.
+    lint.sh falls back to the marker lines of the human report.
     """
     findings: list[str] = []
     skipped: set[str] = set()
@@ -782,7 +724,7 @@ def main() -> int:
     if scope_root is None:
         return 0
 
-    # Relative to the scope root because that is the container's working directory.
+    # Relative to the scope root because that is the working directory for lint.sh.
     try:
         relative = edited.resolve().relative_to(scope_root.resolve()).as_posix()
     except (ValueError, OSError):

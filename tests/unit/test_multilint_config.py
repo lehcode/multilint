@@ -172,15 +172,19 @@ class TestSettings:
         status = json.loads(capsys.readouterr().out)
         assert status["config"] == {}
         assert status["exists"] is False
-        assert status["settings"] == {"image": None, "search_ceiling": None}
+        assert status["settings"] == {"search_ceiling": None}
         assert not (root / ".multilint.json").exists()
 
-    def test_image_is_a_setting_and_ignores_retired_variable(self, tool, root, capsys, monkeypatch):
-        monkeypatch.setenv("MULTILINT_IMAGE", "foo")
-        assert run(tool, root, "image", "local/multilint:dev") == 0
+    def test_search_ceiling_is_a_setting(self, tool, root, tmp_path, capsys):
+        assert run(tool, root, "search-ceiling", str(tmp_path)) == 0
         capsys.readouterr()
         assert run(tool, root, "show") == 0
-        assert json.loads(capsys.readouterr().out)["settings"]["image"] == "local/multilint:dev"
+        assert json.loads(capsys.readouterr().out)["settings"]["search_ceiling"] == str(tmp_path)
+        assert not (root / ".multilint.json").exists()
+
+    @pytest.mark.parametrize("verb", [("image", "local/multilint:dev"), ("unset-image",)])
+    def test_image_verbs_are_retired(self, tool, root, verb):
+        assert run(tool, root, *verb) != 0
         assert not (root / ".multilint.json").exists()
 
     def test_downstream_rejection_is_surfaced(self, tool, root, capsys):

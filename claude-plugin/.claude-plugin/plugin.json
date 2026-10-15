@@ -1,6 +1,6 @@
 {
   "name": "multilint",
-  "description": "Lints changed files in a throwaway container after every edit, and adds a linting subagent. Requires docker on PATH.",
+  "description": "Lints changed files on the host after every edit, and adds a linting subagent. Missing linters are reported as skipped.",
   "version": "0.2.0",
   "author": {
     "name": "Anton Repin"
