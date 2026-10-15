@@ -14,7 +14,7 @@ import pytest
 import pytest_mock
 
 SERVER_PY = Path(__file__).parent.parent / "server.py"
-LINT_SH = Path(__file__).parent.parent / "lint.sh"
+LINT_SH = Path(__file__).parent.parent / "core" / "lint.sh"
 
 
 @pytest.fixture

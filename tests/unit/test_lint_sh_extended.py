@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-LINT_SH = Path(__file__).parent.parent.parent / "lint.sh"
+LINT_SH = Path(__file__).parent.parent.parent / "core" / "lint.sh"
 
 
 @pytest.fixture(autouse=True)

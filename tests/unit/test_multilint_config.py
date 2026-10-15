@@ -1,4 +1,4 @@
-"""Unit tests for the configuration tool, claude-plugin/scripts/multilint_config.py.
+"""Unit tests for the configuration tool, core/multilint_config.py.
 
 Nothing here starts a container. Settings verbs run the real lint_changed.py as a child process
 against a throwaway XDG_STATE_HOME, exactly as the tool does in use.
@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).parent.parent.parent
-SCRIPT_PATH = REPO / "claude-plugin" / "scripts" / "multilint_config.py"
-LINT_SH = REPO / "lint.sh"
+SCRIPT_PATH = REPO / "core" / "multilint_config.py"
+LINT_SH = REPO / "core" / "lint.sh"
 CONSTANTS = ("ALL_CHECKS", "NO_ARGS_CHECKS", "CHECK_SETTING_KEYS", "OPTION_GROUPS")
 
 

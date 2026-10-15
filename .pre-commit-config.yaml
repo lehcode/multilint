@@ -20,6 +20,13 @@ repos:
   # Shell script syntax validation (catches unclosed quotes, etc.)
   - repo: local
     hooks:
+      - id: core-sync
+        name: core/ copies in sync
+        entry: scripts/sync-core.sh --check
+        language: system
+        pass_filenames: false
+        files: '^(core|claude-plugin/scripts)/'
+
       - id: bash-syntax
         name: Bash syntax check
         entry: bash -n

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 SERVER_PY = Path(__file__).parent.parent.parent / "server.py"
-LINT_SH = Path(__file__).parent.parent / "lint.sh"
+LINT_SH = Path(__file__).parent.parent / "core" / "lint.sh"
 
 
 def _start_test_server(tmp_dir: str):
