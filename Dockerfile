@@ -64,7 +64,7 @@ RUN curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gi
 
 WORKDIR /workspace
 
-COPY lint.sh /usr/local/bin/lint.sh
+COPY core/lint.sh /usr/local/bin/lint.sh
 COPY .gitleaks.toml /usr/local/bin/.gitleaks.toml
 COPY server.py /usr/local/bin/server.py
 COPY mcp_server.py /usr/local/bin/mcp_server.py

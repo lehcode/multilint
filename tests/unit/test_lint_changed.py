@@ -1,4 +1,4 @@
-"""Unit tests for the Claude Code hook body, claude-plugin/scripts/lint_changed.py.
+"""Unit tests for the Claude Code hook body, core/lint_changed.py.
 
 Nothing here starts a container. The argv builder is a pure function precisely so that the
 invocation can be asserted on a machine with no Docker and no image, which is what CI is.
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-HOOK_PATH = Path(__file__).parent.parent.parent / "claude-plugin" / "scripts" / "lint_changed.py"
+HOOK_PATH = Path(__file__).parent.parent.parent / "core" / "lint_changed.py"
 
 
 def _load_module():
@@ -784,7 +784,7 @@ class TestLintableTypesMatchLintSh:
     """
 
     def test_suffixes_match_lint_sh_find_patterns(self, hook):
-        text = (REPO_ROOT / "lint.sh").read_text(encoding="utf-8")
+        text = (REPO_ROOT / "core" / "lint.sh").read_text(encoding="utf-8")
         calls = re.findall(r"< <\(ml_files ((?:'[^']+' )+)--", text)
         patterns = {suffix for call in calls for suffix in re.findall(r"'\*(\.\w+)'", call)}
         assert calls, "no ml_files calls found in lint.sh; update this guard with the file selection"
@@ -801,5 +801,5 @@ class TestHookWiring:
         assert entry["hooks"][0]["command"].endswith('/scripts/multilint.sh"')
 
     def test_entrypoint_execs_hook_body(self):
-        script = (REPO_ROOT / "claude-plugin" / "scripts" / "multilint.sh").read_text(encoding="utf-8")
+        script = (REPO_ROOT / "core" / "multilint.sh").read_text(encoding="utf-8")
         assert 'exec python3 "$(dirname -- "$0")/lint_changed.py"' in script
