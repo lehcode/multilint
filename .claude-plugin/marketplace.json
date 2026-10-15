@@ -1,0 +1,14 @@
+{
+  "name": "multilint",
+  "description": "Multi-language linting for Claude Code: lints each edited file in a throwaway container.",
+  "owner": {
+    "name": "Anton Repin"
+  },
+  "plugins": [
+    {
+      "name": "multilint",
+      "source": "./claude-plugin",
+      "description": "Lints changed files in a throwaway container after every edit, and adds a linting subagent. Requires docker on PATH."
+    }
+  ]
+}
