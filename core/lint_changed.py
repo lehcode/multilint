@@ -28,8 +28,9 @@ that path is per-conversation (issue #51398).
 
 POSIX only. WSL counts and needs nothing extra; native Windows is not a target.
 
-Always exits 0. A missing lint.sh, an unreadable payload or an empty changeset is a silent no-op,
-matching the non-blocking behaviour of the OpenCode plugin.
+Always exits 0, so an edit is never blocked. An unreadable payload or an unsupported file is a silent
+no-op. A file that cannot be linted (no lint.sh, no bash, a timeout, no readable result) gets a
+notice saying so, because silence there reads exactly like a clean file.
 
 Linters come from the host PATH. A missing linter is reported by lint.sh as a skipped check, and
 the hook surfaces skipped checks to Claude, so a missing tool is never a silent pass.
@@ -452,20 +453,24 @@ def split_stream(text: str) -> dict[str, str]:
     return sections
 
 
+class LintUnavailable(Exception):
+    """lint.sh could not produce a result; the message says why."""
+
+
 def run_lint(scope_root: Path, relative_paths: list[str]) -> list[tuple[str, dict, str]]:
     """Run lint.sh over every changed file on the host.
 
     Returns (file, JSON document, human-readable detail) per file. A document that will not parse is
-    dropped rather than guessed at, on the principle that a malformed result should look like
-    "nothing to report" and not like a finding.
+    dropped rather than guessed at, so a malformed result is never reported as a finding.
 
-    An empty list means nothing could be determined — no lint.sh, no bash, a timeout — and is
-    deliberately indistinguishable from "no findings" to the caller, because the hook must never
-    block an edit on infrastructure trouble.
+    Raises LintUnavailable when nothing could be determined — no lint.sh, no bash, a timeout, no
+    readable document — so the caller can say the file is unverified instead of staying silent.
     """
     lint_sh = _lint_sh_path()
-    if not lint_sh.exists() or shutil.which("bash") is None:
-        return []
+    if not lint_sh.exists():
+        raise LintUnavailable(f"lint.sh not found at {lint_sh}")
+    if shutil.which("bash") is None:
+        raise LintUnavailable("bash not found on PATH")
     try:
         proc = subprocess.run(
             ["bash", "-c", lint_program(), "_", str(lint_sh)] + relative_paths,
@@ -475,8 +480,10 @@ def run_lint(scope_root: Path, relative_paths: list[str]) -> list[tuple[str, dic
             check=False,
             timeout=RUN_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError):
-        return []
+    except subprocess.TimeoutExpired:
+        raise LintUnavailable(f"lint.sh did not finish within {RUN_TIMEOUT_SECONDS} s") from None
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LintUnavailable(f"lint.sh could not be started: {exc}") from None
 
     details = split_stream(proc.stderr)
     results: list[tuple[str, dict, str]] = []
@@ -487,6 +494,8 @@ def run_lint(scope_root: Path, relative_paths: list[str]) -> list[tuple[str, dic
             continue
         if isinstance(document, dict):
             results.append((name, document, details.get(name, "")))
+    if not results:
+        raise LintUnavailable(f"lint.sh produced no readable result (exit status {proc.returncode})")
     return results
 
 
@@ -729,8 +738,10 @@ def main() -> int:
     except (ValueError, OSError):
         return 0
 
-    results = run_lint(scope_root, [relative])
-    if not results:
+    try:
+        results = run_lint(scope_root, [relative])
+    except LintUnavailable as exc:
+        emit([f"multilint could not lint {relative}: {exc}. Treat the file as unverified."], "could not lint")
         return 0
 
     findings, skipped, warnings, failed = summarize_results(results)
@@ -747,17 +758,22 @@ def main() -> int:
     if skipped:
         summary.append(f"{len(skipped)} check(s) skipped")
 
+    emit(notices, ", ".join(summary) if summary else "configuration notice")
+    return 0
+
+
+def emit(notices: list[str], summary: str) -> None:
+    """Write the PostToolUse hook output: notices for Claude, a one-line summary for the user."""
     json.dump(
         {
             "hookSpecificOutput": {
                 "hookEventName": "PostToolUse",
                 "additionalContext": "\n\n".join(notices),
             },
-            "systemMessage": "multilint: " + (", ".join(summary) if summary else "configuration notice"),
+            "systemMessage": "multilint: " + summary,
         },
         sys.stdout,
     )
-    return 0
 
 
 def run_settings_cli(argv: list[str]) -> int:

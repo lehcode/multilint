@@ -115,8 +115,8 @@ class TestResultParsing:
         assert "shellcheck" in sections["b.sh"]
         assert "shellcheck" not in sections["a.py"]
 
-    def test_unparsable_document_is_dropped_not_guessed(self, hook, monkeypatch, tmp_path):
-        """A malformed result must look like "nothing to report", never like a finding."""
+    def test_unparsable_document_is_unavailable_not_guessed(self, hook, monkeypatch, tmp_path):
+        """A malformed result is never reported as a finding; it makes the file unverified."""
         lint_sh = tmp_path / "lint.sh"
         lint_sh.touch()
         monkeypatch.setattr(hook, "_lint_sh_path", lambda: lint_sh)
@@ -125,24 +125,26 @@ class TestResultParsing:
         class _Proc:
             stdout = f"{hook.FILE_MARKER}a.py\nthis is not json\n"
             stderr = ""
+            returncode = 1
 
         monkeypatch.setattr(hook.subprocess, "run", lambda *_a, **_k: _Proc())
-        assert hook.run_lint(Path("/p"), ["a.py"]) == []
+        with pytest.raises(hook.LintUnavailable, match="no readable result"):
+            hook.run_lint(Path("/p"), ["a.py"])
 
-    def test_missing_lint_sh_is_a_silent_no_op(self, hook, monkeypatch):
-        """A machine without lint.sh gets no findings and no error, so edits are never blocked."""
+    def test_missing_lint_sh_is_unavailable(self, hook, monkeypatch):
         monkeypatch.setattr(hook, "_lint_sh_path", lambda: Path("/nonexistent/lint.sh"))
-        assert hook.run_lint(Path("/p"), ["a.py"]) == []
+        with pytest.raises(hook.LintUnavailable, match="lint.sh not found"):
+            hook.run_lint(Path("/p"), ["a.py"])
 
-    def test_missing_bash_is_a_silent_no_op(self, hook, monkeypatch, tmp_path):
-        """A machine without bash gets no findings and no error, so edits are never blocked."""
+    def test_missing_bash_is_unavailable(self, hook, monkeypatch, tmp_path):
         lint_sh = tmp_path / "lint.sh"
         lint_sh.touch()
         monkeypatch.setattr(hook, "_lint_sh_path", lambda: lint_sh)
         monkeypatch.setattr(hook.shutil, "which", lambda _name: None)
-        assert hook.run_lint(Path("/p"), ["a.py"]) == []
+        with pytest.raises(hook.LintUnavailable, match="bash not found"):
+            hook.run_lint(Path("/p"), ["a.py"])
 
-    def test_subprocess_failure_is_a_silent_no_op(self, hook, monkeypatch, tmp_path):
+    def test_subprocess_failure_is_unavailable(self, hook, monkeypatch, tmp_path):
         lint_sh = tmp_path / "lint.sh"
         lint_sh.touch()
         monkeypatch.setattr(hook, "_lint_sh_path", lambda: lint_sh)
@@ -152,7 +154,8 @@ class TestResultParsing:
             raise OSError("no such binary")
 
         monkeypatch.setattr(hook.subprocess, "run", _boom)
-        assert hook.run_lint(Path("/p"), ["a.py"]) == []
+        with pytest.raises(hook.LintUnavailable, match="could not be started"):
+            hook.run_lint(Path("/p"), ["a.py"])
 
 
 class TestLocalRun:
@@ -175,20 +178,21 @@ class TestLocalRun:
             calls.append((args[0], kwargs.get("cwd")))
 
             class _Proc:
-                stdout = ""
+                stdout = f'{hook.FILE_MARKER}a.py\n{{"checks": {{}}}}\n'
                 stderr = ""
+                returncode = 0
 
             return _Proc()
 
         monkeypatch.setattr(hook.subprocess, "run", mock_run)
         monkeypatch.setattr(hook.shutil, "which", lambda _: "/usr/bin/bash")
 
-        hook.run_lint(tmp_path, ["a.py"])
+        assert hook.run_lint(tmp_path, ["a.py"]) == [("a.py", {"checks": {}}, "")]
 
         assert calls == [(["bash", "-c", hook.lint_program(), "_", str(lint_sh), "a.py"], tmp_path)]
 
     def test_run_lint_handles_timeout(self, hook, monkeypatch, tmp_path):
-        """A timeout is treated as an infrastructure issue, not a test failure."""
+        """A timeout makes the file unverified, never a silent pass."""
         lint_sh = tmp_path / "lint.sh"
         lint_sh.touch()
         monkeypatch.setattr(hook, "_lint_sh_path", lambda: lint_sh)
@@ -199,7 +203,8 @@ class TestLocalRun:
 
         monkeypatch.setattr(hook.subprocess, "run", mock_run)
 
-        assert hook.run_lint(tmp_path, ["a.py"]) == []
+        with pytest.raises(hook.LintUnavailable, match="did not finish within 120 s"):
+            hook.run_lint(tmp_path, ["a.py"])
 
 
 class TestSkippedChecksAreSurfaced:
@@ -686,6 +691,8 @@ def _drive_hook(hook, monkeypatch, tmp_path, payload, run_lint_result=()):
 
     def stub_run_lint(scope_root, relative_paths):
         calls.append((scope_root, list(relative_paths)))
+        if isinstance(run_lint_result, Exception):
+            raise run_lint_result
         return list(run_lint_result)
 
     monkeypatch.setattr(hook, "state_dir", lambda: tmp_path / "state")
@@ -766,6 +773,23 @@ class TestEveryLintableTypeReachesLint:
         context = json.loads(out)["hookSpecificOutput"]["additionalContext"]
         assert "markdownlint" in context
         assert "MD009" in context
+
+    def test_unavailable_lint_is_reported_not_silent(self, hook, tmp_path, monkeypatch):
+        """When lint.sh cannot run, Claude is told the file is unverified; the edit still succeeds."""
+        repo = _git_repo(tmp_path)
+        (repo / "sample.py").write_text("x = 1\n", encoding="utf-8")
+        payload = {"tool_name": "Write", "cwd": str(repo), "tool_input": {"file_path": str(repo / "sample.py")}}
+
+        code, _calls, out = _drive_hook(
+            hook, monkeypatch, tmp_path, payload, hook.LintUnavailable("bash not found on PATH")
+        )
+
+        output = json.loads(out)
+        assert code == 0
+        assert output["hookSpecificOutput"]["additionalContext"] == (
+            "multilint could not lint sample.py: bash not found on PATH. Treat the file as unverified."
+        )
+        assert output["systemMessage"] == "multilint: could not lint"
 
 
 class TestLintableTypesMatchLintSh:
