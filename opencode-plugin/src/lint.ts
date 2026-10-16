@@ -38,7 +38,10 @@ function wrap(text: string): string {
   return `<multilint>\n${text}\n</multilint>`;
 }
 
-/** Run multilint.sh with `payload` on stdin; resolves with its stdout. Rejects on spawn failure or timeout. */
+/**
+ * Run multilint.sh with `payload` on stdin; resolves with its stdout. Rejects on spawn failure,
+ * timeout, or a non-zero exit: the script always exits 0, so anything else is a crash or a kill.
+ */
 function runHook(payload: object, cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("bash", [MULTILINT_SH], { cwd, stdio: ["pipe", "pipe", "ignore"] });
@@ -52,9 +55,10 @@ function runHook(payload: object, cwd: string): Promise<string> {
       clearTimeout(timer);
       reject(error);
     });
-    child.on("close", () => {
+    child.on("close", (code, signal) => {
       clearTimeout(timer);
-      resolve(stdout);
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`multilint.sh exited with ${signal ? `signal ${signal}` : `status ${code}`}`));
     });
     child.stdin.on("error", () => {}); // EPIPE when the script exits early; the close handler reports.
     child.stdin.end(JSON.stringify(payload));
@@ -74,7 +78,8 @@ export async function lintNotice(filePath: string, directory: string | undefined
   } else if (typeof directory === "string" && path.isAbsolute(directory)) {
     absolute = path.resolve(directory, filePath);
     // A relative path that climbs out of the project directory is not an edit of this project.
-    if (path.relative(directory, absolute).startsWith("..")) return null;
+    const relative = path.relative(directory, absolute);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`)) return null;
   } else {
     return null;
   }

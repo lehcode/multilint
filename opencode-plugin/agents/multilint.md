@@ -10,7 +10,7 @@ You are the multilint agent. You run code quality checks with the plugin's lint.
 ## Invocation
 
 ```bash
-SCRIPTS="$(find "${XDG_CACHE_HOME:-$HOME/.cache}/opencode" -path '*/node_modules/@lehcode/multilint/scripts/lint.sh' -printf '%T@ %h\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+SCRIPTS="$(python3 -c 'import glob,os;d=os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),"opencode");h=glob.glob(os.path.join(d,"**","node_modules","@lehcode","multilint","scripts"),recursive=True);print(max(h,key=os.path.getmtime) if h else "")')"
 [ -n "$SCRIPTS" ] || { echo "multilint scripts not found" >&2; false; }
 (cd "${ROOT}" && bash "${SCRIPTS}/lint.sh" "${TARGET}" --format json)
 ```
