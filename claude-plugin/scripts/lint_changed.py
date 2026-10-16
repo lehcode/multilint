@@ -18,16 +18,15 @@ file in a directory shares its repository and re-walking the ancestors on every 
 Cached roots are re-stat'ed before use: `git init`, `rm -rf .git` and a clone all change the answer,
 and a stale cache would serve a wrong one.
 
-The repository search stops at $HOME. Unbounded, it reaches `/`, and since the scope root is what
-gets mounted, an edit to a file in a system directory mounted that directory.
+The repository search stops at $HOME. Unbounded, it reaches `/`, and since the scope root is lint.sh's
+working directory, an edit to a file in a system directory would lint from that directory.
 
 The database deliberately lives outside ~/.claude/. Writes under ~/.claude/plugins/data/ raise the
 protected-directory permission prompt even under bypassPermissions
 (github.com/anthropics/claude-code/issues/41156), which would prompt on every edit, and in Cowork
 that path is per-conversation (issue #51398).
 
-POSIX only. WSL counts and needs nothing extra; native Windows is not a target, so `os.getuid()` is
-called directly rather than guarded.
+POSIX only. WSL counts and needs nothing extra; native Windows is not a target.
 
 Always exits 0. A missing lint.sh, an unreadable payload or an empty changeset is a silent no-op,
 matching the non-blocking behaviour of the OpenCode plugin.
