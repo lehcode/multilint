@@ -791,6 +791,35 @@ class TestEveryLintableTypeReachesLint:
         )
         assert output["systemMessage"] == "multilint: could not lint"
 
+    def test_identical_save_after_unavailable_lint_is_linted_again(self, hook, tmp_path, monkeypatch):
+        """The digest is recorded before linting; a failed run must not make the next save "unchanged"."""
+        repo = _git_repo(tmp_path)
+        (repo / "sample.py").write_text("x = 1\n", encoding="utf-8")
+        payload = {"tool_name": "Write", "cwd": str(repo), "tool_input": {"file_path": str(repo / "sample.py")}}
+
+        _drive_hook(hook, monkeypatch, tmp_path, payload, hook.LintUnavailable("bash not found on PATH"))
+        _code, calls, _out = _drive_hook(hook, monkeypatch, tmp_path, payload)
+        assert len(calls) == 1, "an identical save after a failed lint was treated as unchanged"
+        _code, calls, _out = _drive_hook(hook, monkeypatch, tmp_path, payload)
+        assert calls == [], "after a successful lint, an identical save is still skipped"
+
+    def test_multilint_sh_without_python3_reports_a_notice(self, tmp_path):
+        """No python3 on PATH: the entry script exits 0 with a notice, never silently."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        bash = subprocess.run(["bash", "-c", "command -v bash"], capture_output=True, text=True).stdout.strip()
+        proc = subprocess.run(
+            [bash, str(HOOK_PATH.parent / "multilint.sh")],
+            input="{}",
+            capture_output=True,
+            text=True,
+            env={"PATH": str(bin_dir)},
+        )
+        assert proc.returncode == 0
+        output = json.loads(proc.stdout)
+        assert "python3 not found on PATH" in output["hookSpecificOutput"]["additionalContext"]
+        assert output["systemMessage"] == "multilint: could not lint"
+
 
 class TestLintableTypesMatchLintSh:
     """The hook's suffix list and lint.sh's find patterns must agree.

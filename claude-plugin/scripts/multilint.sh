@@ -9,12 +9,15 @@
 # agree and indentation is allowed again here. Left flat because it works and
 # all real logic lives in lint_changed.py next to this file.
 #
-# Exits 0 when python3 is missing rather than failing, so a machine without
-# python3 gets a silent no-op instead of a "hook error" notice in the
-# transcript. Neither Claude Code nor OpenCode guarantees python3 is present.
+# Exits 0 when python3 is missing rather than failing, so the edit is never
+# blocked, but prints a notice: silence would read like a clean file. Neither
+# Claude Code nor OpenCode guarantees python3 is present.
 
 set -uo pipefail
 
-command -v python3 >/dev/null 2>&1 || exit 0
+if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' '{"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "multilint could not lint the edited file: python3 not found on PATH. Treat the file as unverified."}, "systemMessage": "multilint: could not lint"}'
+    exit 0
+fi
 
 exec python3 "$(dirname -- "$0")/lint_changed.py"
