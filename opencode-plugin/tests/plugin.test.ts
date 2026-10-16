@@ -23,6 +23,9 @@ beforeAll(() => {
   execFileSync("git", ["init", "-q"], { cwd: project });
   writeFileSync(path.join(project, "broken.sh"), DEFECTIVE_SH);
   writeFileSync(path.join(project, "sub", "a.sh"), DEFECTIVE_SH);
+  // Defective and inside the search ceiling, so only the plugin's path guard keeps it unlinted.
+  writeFileSync(path.join(root, "outside.sh"), DEFECTIVE_SH);
+  writeFileSync(path.join(project, "..dotted.sh"), DEFECTIVE_SH);
   process.env.XDG_STATE_HOME = path.join(root, "state");
   // The hook never searches above its ceiling ($HOME by default); the temp dir is outside $HOME.
   const lintChanged = path.join(path.dirname(MULTILINT_SH), "lint_changed.py");
@@ -67,6 +70,14 @@ test("V2: a defective file's findings are pushed onto the tool result", async ()
 test("V2: a relative path outside the project is not linted", async () => {
   const event = await runV2({ path: "../outside.sh" }, { content: [{ type: "text", text: "ok" }] });
   expect(event.result.content).toHaveLength(1);
+  // The same file named by its absolute path is linted, which proves the guard above did the work.
+  const absolute = await runV2({ path: path.join(root, "outside.sh") }, { content: [{ type: "text", text: "ok" }] });
+  expect(absolute.result.content[1].text).toContain("shellcheck");
+});
+
+test("V2: a file whose name starts with '..' is inside the project", async () => {
+  const event = await runV2({ path: "..dotted.sh" }, { content: [{ type: "text", text: "ok" }] });
+  expect(event.result.content[1].text).toContain("shellcheck");
 });
 
 test("V1 and module shape: default-only exports, one hook, notice appended to output", async () => {
@@ -78,6 +89,21 @@ test("V1 and module shape: default-only exports, one hook, notice appended to ou
   await hooks["tool.execute.after"]({ tool: "write", sessionID: "s", callID: "c", args: { filePath: "v1.sh" } }, output);
   expect(output.output.startsWith("Wrote file\n\n<multilint>")).toBe(true);
   expect(output.output).toContain("shellcheck");
+});
+
+test("a crashed run is reported, never silent", async () => {
+  writeFileSync(path.join(project, "crash.sh"), DEFECTIVE_SH);
+  const bin = path.join(root, "crash-bin");
+  mkdirSync(bin, { recursive: true });
+  // A python3 that dies: multilint.sh execs it, so the script exits non-zero with no output.
+  writeFileSync(path.join(bin, "python3"), "#!/bin/sh\nexit 3\n", { mode: 0o755 });
+  process.env.PATH = `${bin}:${saved.PATH}`;
+  try {
+    const event = await runV2({ path: "crash.sh" }, { content: [{ type: "text", text: "ok" }] });
+    expect(event.result.content[1].text).toContain("multilint.sh exited with status 3");
+  } finally {
+    process.env.PATH = saved.PATH;
+  }
 });
 
 test("a run that cannot start is reported, never silent", async () => {
