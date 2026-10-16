@@ -114,7 +114,6 @@ REJECTIONS = [
     (("option", "gitleaks", "verbose", "1"), "verbose"),
     (("option", "flake8", "x", "1"), "flake8"),
     (("option", "bandit", "severity", "-lllll"), "-lllll"),
-    (("disable", "image"), "image"),
 ]
 
 
@@ -172,7 +171,7 @@ class TestSettings:
         status = json.loads(capsys.readouterr().out)
         assert status["config"] == {}
         assert status["exists"] is False
-        assert status["settings"] == {"search_ceiling": None}
+        assert status["settings"] == {"image": None, "search_ceiling": None}
         assert not (root / ".multilint.json").exists()
 
     def test_search_ceiling_is_a_setting(self, tool, root, tmp_path, capsys):
@@ -182,9 +181,22 @@ class TestSettings:
         assert json.loads(capsys.readouterr().out)["settings"]["search_ceiling"] == str(tmp_path)
         assert not (root / ".multilint.json").exists()
 
-    @pytest.mark.parametrize("verb", [("image", "local/multilint:dev"), ("unset-image",)])
-    def test_image_verbs_are_retired(self, tool, root, verb):
-        assert run(tool, root, *verb) != 0
+    def test_image_verbs_delegate_to_settings(self, tool, root, tmp_path, capsys):
+        """image / unset-image write to lint_changed.py settings, not .multilint.json."""
+        assert run(tool, root, "image", "local/multilint:dev") == 0
+        assert not (root / ".multilint.json").exists()
+        capsys.readouterr()  # image verb has no JSON output; clear before show
+        assert run(tool, root, "show") == 0
+        output = json.loads(capsys.readouterr().out)
+        assert output["settings"]["image"] == "local/multilint:dev"
+
+    def test_unset_image_removes_the_value(self, tool, root, tmp_path, capsys):
+        assert run(tool, root, "image", "local/test:img") == 0
+        assert run(tool, root, "unset-image") == 0
+        capsys.readouterr()  # clear before show
+        assert run(tool, root, "show") == 0
+        output = json.loads(capsys.readouterr().out)
+        assert output["settings"]["image"] is None
         assert not (root / ".multilint.json").exists()
 
     def test_downstream_rejection_is_surfaced(self, tool, root, capsys):

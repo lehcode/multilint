@@ -5,6 +5,9 @@
       "release-type": "simple",
       "package-name": "@lehcode/multilint",
       "extra-files": [
+        { "type": "generic", "path": "core/lint_changed.py" },
+        { "type": "generic", "path": "claude-plugin/scripts/lint_changed.py" },
+        { "type": "generic", "path": "opencode-plugin/scripts/lint_changed.py" },
         { "type": "json", "path": "opencode-plugin/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "opencode-plugin/package-lock.json", "jsonpath": "$.version" }
       ],

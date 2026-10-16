@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""PostToolUse hook body: lint the files that actually changed on the host.
+"""PostToolUse hook body: lint the edited file in an ephemeral container.
 
-Reads the hook payload on stdin, works out which files changed, runs them through the lint.sh script
-on the host system, and reports failing or skipped checks back to Claude.
+Reads the hook payload on stdin, decides whether the edited file changed, lints it in one ephemeral
+Docker container (`docker run --rm`), and reports failing or skipped checks back to Claude.
+
+The container runs the plugin's own lint.sh, mounted read-only at /opt/multilint, so the engine
+always matches the plugin; the image supplies only the linters. The scope root is mounted read-only
+at its own path (an identity mount), so the container sees every file at the path the host calls it.
 
 Scope root is the enclosing git repository when there is one, otherwise the edited file's directory.
-This is the working directory in which lint.sh is invoked.
+It is the only source root mounted, and also the container's working directory.
 
 The target is the file the hook reported, and only that file. An earlier version collected every
 dirty and untracked file in the repository and linted up to 25 of them per edit, which meant one
@@ -18,22 +22,23 @@ file in a directory shares its repository and re-walking the ancestors on every 
 Cached roots are re-stat'ed before use: `git init`, `rm -rf .git` and a clone all change the answer,
 and a stale cache would serve a wrong one.
 
-The repository search stops at $HOME. Unbounded, it reaches `/`, and since the scope root is lint.sh's
-working directory, an edit to a file in a system directory would lint from that directory.
+The repository search stops at $HOME. Unbounded, it reaches `/`, and since the scope root is what
+gets bind-mounted, an edit to a file in a system directory would mount that directory.
 
 The database deliberately lives outside ~/.claude/. Writes under ~/.claude/plugins/data/ raise the
 protected-directory permission prompt even under bypassPermissions
 (github.com/anthropics/claude-code/issues/41156), which would prompt on every edit, and in Cowork
 that path is per-conversation (issue #51398).
 
-POSIX only. WSL counts and needs nothing extra; native Windows is not a target.
+POSIX only. WSL counts and needs nothing extra; native Windows is not a target, so `os.getuid()` is
+called directly rather than guarded.
 
 Always exits 0, so an edit is never blocked. An unreadable payload or an unsupported file is a silent
-no-op. A file that cannot be linted (no lint.sh, no bash, a timeout, no readable result) gets a
-notice saying so, because silence there reads exactly like a clean file.
+no-op. A file that cannot be linted (no docker, a daemon or pull failure, a timeout, no readable
+result) gets a notice saying so, because silence there reads exactly like a clean file.
 
-Linters come from the host PATH. A missing linter is reported by lint.sh as a skipped check, and
-the hook surfaces skipped checks to Claude, so a missing tool is never a silent pass.
+Docker is the single dependency. The container is sandboxed: `--network none`, `--memory 2g`,
+`--cpus 2`, `--user <uid>:<gid>`, and both mounts read-only.
 """
 
 # Required, not stylistic. This module runs on the *host* interpreter, which the
@@ -61,19 +66,34 @@ LINTABLE_SUFFIXES = {".sh", ".bash", ".py", ".md", ".yaml", ".yml", ".json", ".t
 # 2000-file "changed set" never described 2000 simultaneous saves — it described a dirty repository —
 # and a cap on a list that can only hold one element is not a guard.
 
-# Wall-clock ceiling for the whole run, not per file. The hook runs lint.sh on the host.
-RUN_TIMEOUT_SECONDS = 120
+# Published on Docker Hub, which serves anonymous pulls; ghcr.io carries the same tags but can
+# require a token. Override the "image" hook-setting to run a local build instead
+# (`python3 lint_changed.py --set image local/build:dev`).
+# Pinned to the release that ships this plugin, never :latest, so the toolchain cannot drift from
+# the engine. release-please bumps the tag through the marker comment.
+DEFAULT_IMAGE = "lehcode/multilint:v0.2.1"  # x-release-please-version
+
+# Wall-clock ceiling for the whole container, not per file. Generous because a first pull has to
+# fetch the image, and a timeout here means the edit is reported as unchecked rather than clean.
+RUN_TIMEOUT_SECONDS = 300
+
+# Resource caps, so the hook cannot starve the machine it runs on.
+MEMORY_LIMIT = "2g"
+CPU_LIMIT = "2"
 
 # Separator printed to stdout before each file's JSON document, so one run producing N
 # documents can be split back apart. Chosen to be something no linter emits.
 FILE_MARKER = "===MULTILINT-FILE==="
 
-# The host-plugin setting that shapes how the plugin runs, not what a check does -- lives in a
-# `settings` table inside the same state database, written only through this CLI
-# (`--set`/`--get`/`--unset`) and read read-only by the OpenCode plugin. Environment variables are
-# not a multilint configuration surface (user decision, 2026-09-30); MULTILINT_IMAGE,
+# Where the plugin's scripts/ directory (lint.sh included) is mounted read-only in the container.
+CONTAINER_SCRIPTS = "/opt/multilint"
+
+# The two host-plugin settings that are not linter configuration -- they shape how the plugin runs,
+# not what a check does -- live in a `settings` table inside the same state database, written only
+# through this CLI (`--set`/`--get`/`--unset`) and read read-only by the OpenCode plugin. Environment
+# variables are not a multilint configuration surface (user decision, 2026-09-30); MULTILINT_IMAGE,
 # MULTILINT_SEARCH_CEILING and MULTILINT_STATE_DIR are retired with no environment replacement.
-SETTINGS_KEYS = ("search_ceiling",)
+SETTINGS_KEYS = ("image", "search_ceiling")
 
 # Nothing is filtered out of the skipped set any more. gitleaks used to be listed here because
 # lint.sh gated it on "$TARGET_DIR/.git" and a single-file target can never satisfy that, so it was
@@ -179,24 +199,25 @@ def unset_setting(key: str) -> None:
         connection.close()
 
 
-def lint_program() -> str:
-    """The bash program run on the host.
+def resolve_image() -> str:
+    """Image to run. The "image" hook-setting overrides the published default."""
+    return read_setting("image") or DEFAULT_IMAGE
 
-    One lint.sh invocation per file. lint.sh takes a single target and has no multi-target mode.
+
+def container_program() -> str:
+    """The bash program run inside the container.
+
+    One lint.sh run per file, in one container. lint.sh takes a single target and has no
+    multi-target mode.
 
     Each document is preceded by a marker line so the combined stdout can be split back into one
     result per file. In JSON mode lint.sh sends human-readable output to stderr and only JSON to
     stdout, so stdout stays parsable.
 
-    The path to lint.sh is passed as the first positional argument, so `$1` is the lint.sh script
-    and `$@` (shifted past the script) are the file targets.
-
     `|| rc=1` rather than `set -e`: a failing file must not stop the remaining files from being
     checked, but the overall exit status should still reflect that something failed.
     """
     return (
-        'lint_sh="$1"\n'
-        "shift\n"
         "rc=0\n"
         'for f in "$@"; do\n'
         f'    printf "%s%s\\n" "{FILE_MARKER}" "$f"\n'
@@ -204,15 +225,66 @@ def lint_program() -> str:
         # mode. Without a marker there, the detail for N files arrives as one undivided blob and
         # cannot be attributed to the file it belongs to.
         f'    printf "%s%s\\n" "{FILE_MARKER}" "$f" >&2\n'
-        f'    bash "$lint_sh" "$f" --format json || rc=1\n'
+        f'    bash {CONTAINER_SCRIPTS}/lint.sh "$f" --format json || rc=1\n'
         "done\n"
         "exit $rc\n"
     )
 
 
-def _lint_sh_path() -> Path:
-    """Path to the lint.sh script in the same directory as this module."""
-    return Path(__file__).resolve().parent / "lint.sh"
+def scripts_dir() -> Path:
+    """The plugin's scripts directory: this module's own directory, which also holds lint.sh."""
+    return Path(__file__).resolve().parent
+
+
+def build_docker_argv(scope_root: Path, relative_paths: list[str], image: str | None = None) -> list[str]:
+    """Assemble the full `docker run` argv.
+
+    Kept free of side effects so tests can assert on the exact arguments without Docker present.
+
+    Two mounts are used:
+
+    1. **Identity mount** — source and target are the same absolute path. The container sees the file
+       at the path the host calls it, so no translation table exists to be wrong or out of date.
+    2. **Scripts mount** — the plugin's scripts directory at ``/opt/multilint``, so the container
+       runs this plugin's lint.sh rather than any copy baked into the image.
+
+    ``--mount`` rather than ``-v``: the ``-v src:dst:opts`` form is colon-delimited, and in zsh
+    ``"$PWD:$PWD:ro"`` silently becomes ``.../multilint:.../multilinto``, because ``:r`` is a
+    parameter modifier that applies even inside double quotes. That produced a container mounted
+    read-write at the wrong target, an empty working directory, and a lint run that reported success
+    having examined nothing. ``--mount`` takes named keys and cannot be misread that way.
+    """
+    root = str(scope_root)
+    argv = [
+        "docker",
+        "run",
+        "--rm",
+        # No linter needs the network. gitleaks reads local history; every other tool reads files.
+        "--network",
+        "none",
+        "--memory",
+        MEMORY_LIMIT,
+        "--cpus",
+        CPU_LIMIT,
+        # Identity mount: source root at the same path inside the container.
+        "--mount",
+        f"type=bind,source={root},target={root},readonly",
+        "--mount",
+        f"type=bind,source={scripts_dir()},target={CONTAINER_SCRIPTS},readonly",
+        "--workdir",
+        root,
+        # lint.sh resolves .multilint.json and .markdownlint.json relative to the working directory,
+        # so the scope root has to be the working directory for per-project config to apply.
+        "--entrypoint",
+        "bash",
+        # Run as the invoking user so nothing in the container acts as root, whatever USER the image
+        # declares. POSIX only, which includes WSL; native Windows is not a target.
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+    ]
+    argv += [image or resolve_image(), "-c", container_program(), "_"]
+    argv += relative_paths
+    return argv
 
 
 def edited_file_from_payload(payload: dict) -> Path | None:
@@ -321,8 +393,8 @@ def open_state() -> sqlite3.Connection | None:
             "CREATE TABLE IF NOT EXISTS folders ("
             "folder TEXT PRIMARY KEY, git_root TEXT, resolved_at TEXT, last_used_at TEXT)"
         )
-        # Host-plugin settings (search_ceiling) that replaced MULTILINT_SEARCH_CEILING.
-        # Same database, same migration, so there is one file and one lock.
+        # Host-plugin settings (image, search_ceiling) that replaced MULTILINT_IMAGE and
+        # MULTILINT_SEARCH_CEILING. Same database, same migration, so there is one file and one lock.
         connection.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
         connection.commit()
     except sqlite3.Error:
@@ -457,34 +529,11 @@ class LintUnavailable(Exception):
     """lint.sh could not produce a result; the message says why."""
 
 
-def run_lint(scope_root: Path, relative_paths: list[str]) -> list[tuple[str, dict, str]]:
-    """Run lint.sh over every changed file on the host.
+def parse_results(proc: subprocess.CompletedProcess) -> list[tuple[str, dict, str]]:
+    """Split the container's marker-delimited output into (file, JSON document, detail) per file.
 
-    Returns (file, JSON document, human-readable detail) per file. A document that will not parse is
-    dropped rather than guessed at, so a malformed result is never reported as a finding.
-
-    Raises LintUnavailable when nothing could be determined — no lint.sh, no bash, a timeout, no
-    readable document — so the caller can say the file is unverified instead of staying silent.
+    Raises LintUnavailable when no document parses, naming docker's own error when there is one.
     """
-    lint_sh = _lint_sh_path()
-    if not lint_sh.exists():
-        raise LintUnavailable(f"lint.sh not found at {lint_sh}")
-    if shutil.which("bash") is None:
-        raise LintUnavailable("bash not found on PATH")
-    try:
-        proc = subprocess.run(
-            ["bash", "-c", lint_program(), "_", str(lint_sh)] + relative_paths,
-            cwd=scope_root,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=RUN_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        raise LintUnavailable(f"lint.sh did not finish within {RUN_TIMEOUT_SECONDS} s") from None
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise LintUnavailable(f"lint.sh could not be started: {exc}") from None
-
     details = split_stream(proc.stderr)
     results: list[tuple[str, dict, str]] = []
     for name, body in split_stream(proc.stdout).items():
@@ -495,8 +544,43 @@ def run_lint(scope_root: Path, relative_paths: list[str]) -> list[tuple[str, dic
         if isinstance(document, dict):
             results.append((name, document, details.get(name, "")))
     if not results:
-        raise LintUnavailable(f"lint.sh produced no readable result (exit status {proc.returncode})")
+        # Docker reports daemon, pull and mount errors on stderr before the first marker; lint.sh's own
+        # output comes after it. The last of those lines is the one that says what went wrong.
+        docker_lines = [line.strip() for line in proc.stderr.split(FILE_MARKER, 1)[0].splitlines() if line.strip()]
+        reason = f"exit status {proc.returncode}" + (f": {docker_lines[-1]}" if docker_lines else "")
+        raise LintUnavailable(f"the ephemeral container produced no readable result ({reason})")
     return results
+
+
+def run_lint(scope_root: Path, relative_paths: list[str]) -> list[tuple[str, dict, str]]:
+    """Run one container over every changed file.
+
+    Returns (file, JSON document, human-readable detail) per file. A document that will not parse is
+    dropped rather than guessed at, so a malformed result is never reported as a finding.
+
+    Raises LintUnavailable when nothing could be determined — no docker, a daemon or pull failure, a
+    timeout, no readable document — so the caller can say the file is unverified instead of staying
+    silent.
+    """
+    if shutil.which("docker") is None:
+        raise LintUnavailable("docker not found on PATH")
+    lint_sh = scripts_dir() / "lint.sh"
+    if not lint_sh.exists():
+        raise LintUnavailable(f"lint.sh not found at {lint_sh}")
+    try:
+        proc = subprocess.run(
+            build_docker_argv(scope_root, relative_paths),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise LintUnavailable(f"the ephemeral container did not finish within {RUN_TIMEOUT_SECONDS} s") from None
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LintUnavailable(f"docker could not be started: {exc}") from None
+
+    return parse_results(proc)
 
 
 def failing_checks(document: dict) -> list[str]:
@@ -825,7 +909,27 @@ def run_settings_cli(argv: list[str]) -> int:
     return 1
 
 
+def run_cli(root: str, target: str) -> int:
+    """`--run ROOT TARGET`: lint one target in the same ephemeral container the hook uses.
+
+    For the multilint agent, so the sandbox flags live in build_docker_argv() and nowhere else. Prints
+    lint.sh's JSON document on stdout and its human-readable findings on stderr; exits 1 with the
+    reason on stderr when the container could not produce a result.
+    """
+    try:
+        results = run_lint(Path(root).resolve(), [target])
+    except LintUnavailable as exc:
+        print(f"lint_changed.py: could not lint {target}: {exc}", file=sys.stderr)
+        return 1
+    for _name, document, detail in results:
+        sys.stderr.write(detail)
+        print(json.dumps(document))
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "--run":
+        sys.exit(run_cli(sys.argv[2], sys.argv[3]))
     if sys.argv[1:] and sys.argv[1] in ("--set", "--get", "--unset"):
         sys.exit(run_settings_cli(sys.argv[1:]))
     sys.exit(main())

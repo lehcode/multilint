@@ -1,4 +1,4 @@
-"""Unit tests for the Claude Code hook body, core/lint_changed.py.
+"""Unit tests for the Docker hook body, core/lint_changed.py.
 
 Nothing here starts a container. The argv builder is a pure function precisely so that the
 invocation can be asserted on a machine with no Docker and no image, which is what CI is.
@@ -49,28 +49,133 @@ def _set_ceiling(monkeypatch, hook_module, value):
     )
 
 
-class TestLintProgram:
-    """The bash program run on the host."""
+class TestContainerProgram:
+    """The bash program run inside the container."""
 
     def test_program_keeps_going_after_a_failing_file(self, hook):
         """One bad file must not stop the rest from being checked, but the run must still fail."""
-        program = hook.lint_program()
+        program = hook.container_program()
         assert "|| rc=1" in program
         assert "exit $rc" in program
 
     def test_program_marks_both_streams(self, hook):
         """JSON lands on stdout and human findings on stderr, so both need the marker to be
         split back into per-file results."""
-        program = hook.lint_program()
+        program = hook.container_program()
         assert program.count(hook.FILE_MARKER) == 2
         assert ">&2" in program
 
-    def test_program_reads_lint_sh_from_first_arg(self, hook):
-        """The lint.sh path is passed as $1 and read via shift."""
-        program = hook.lint_program()
-        assert 'lint_sh="$1"' in program
-        assert "shift" in program
-        assert 'bash "$lint_sh"' in program
+    def test_program_runs_container_lint_sh(self, hook):
+        """The program runs lint.sh from CONTAINER_SCRIPTS, not a host path."""
+        program = hook.container_program()
+        assert f"{hook.CONTAINER_SCRIPTS}/lint.sh" in program
+
+    def test_program_has_no_host_path_reference(self, hook):
+        """No /usr/local/bin or other host path in the program."""
+        program = hook.container_program()
+        assert "/usr/local/bin" not in program
+
+
+class TestImageResolution:
+    """DEFAULT_IMAGE and resolve_image()."""
+
+    def test_default_image(self, hook):
+        assert hook.DEFAULT_IMAGE == "lehcode/multilint:v0.2.1"
+
+    def test_default_image_has_version_marker(self, hook):
+        source = HOOK_PATH.read_text(encoding="utf-8")
+        assert "x-release-please-version" in source
+
+    def test_resolve_image_defaults(self, hook, monkeypatch):
+        monkeypatch.setattr(hook, "read_setting", lambda key: None)
+        assert hook.resolve_image() == hook.DEFAULT_IMAGE
+
+    def test_resolve_image_uses_setting(self, hook, monkeypatch):
+        monkeypatch.setattr(hook, "read_setting", lambda key: "local/build:dev")
+        assert hook.resolve_image() == "local/build:dev"
+
+    def test_image_in_settings_keys(self, hook):
+        assert "image" in hook.SETTINGS_KEYS
+
+    def test_settings_keys_order(self, hook):
+        assert hook.SETTINGS_KEYS == ("image", "search_ceiling")
+
+
+class TestDockerArgv:
+    """build_docker_argv() produces the exact sandboxed `docker run` for one ephemeral container."""
+
+    def test_exact_argv(self, hook, monkeypatch, tmp_path):
+        monkeypatch.setattr(hook, "read_setting", lambda key: None)
+        scripts = hook.scripts_dir()
+        assert hook.build_docker_argv(tmp_path, ["a.py", "b.sh"]) == [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--memory",
+            "2g",
+            "--cpus",
+            "2",
+            "--mount",
+            f"type=bind,source={tmp_path},target={tmp_path},readonly",
+            "--mount",
+            f"type=bind,source={scripts},target=/opt/multilint,readonly",
+            "--workdir",
+            str(tmp_path),
+            "--entrypoint",
+            "bash",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            hook.DEFAULT_IMAGE,
+            "-c",
+            hook.container_program(),
+            "_",
+            "a.py",
+            "b.sh",
+        ]
+
+    def test_scripts_dir_holds_lint_sh(self, hook):
+        assert (hook.scripts_dir() / "lint.sh").is_file()
+
+    def test_explicit_image_wins(self, hook, monkeypatch, tmp_path):
+        monkeypatch.setattr(hook, "read_setting", lambda key: "from/setting:1")
+        assert "myimg:v1" in hook.build_docker_argv(tmp_path, ["a.py"], "myimg:v1")
+        assert "from/setting:1" not in hook.build_docker_argv(tmp_path, ["a.py"], "myimg:v1")
+
+    def test_image_setting_overrides_default(self, hook, monkeypatch, tmp_path):
+        monkeypatch.setattr(hook, "read_setting", lambda key: "local/multilint:dev" if key == "image" else None)
+        argv = hook.build_docker_argv(tmp_path, ["a.py"])
+        assert "local/multilint:dev" in argv
+        assert hook.DEFAULT_IMAGE not in argv
+
+
+class TestRunCli:
+    """`--run ROOT TARGET` is the agent's entry: the same container, the document on stdout."""
+
+    def test_prints_the_document_and_the_detail(self, hook, monkeypatch, capsys, tmp_path):
+        calls = []
+
+        def fake_run_lint(scope_root, relative_paths):
+            calls.append((scope_root, relative_paths))
+            return [("a.md", {"checks": {"markdownlint": {"status": "failed"}}}, "MD009 a.md:1\n")]
+
+        monkeypatch.setattr(hook, "run_lint", fake_run_lint)
+        assert hook.run_cli(str(tmp_path), "a.md") == 0
+        out, err = capsys.readouterr()
+        assert json.loads(out) == {"checks": {"markdownlint": {"status": "failed"}}}
+        assert err == "MD009 a.md:1\n"
+        assert calls == [(tmp_path.resolve(), ["a.md"])]
+
+    def test_unavailable_exits_1_with_the_reason(self, hook, monkeypatch, capsys, tmp_path):
+        def unavailable(_root, _paths):
+            raise hook.LintUnavailable("docker not found on PATH")
+
+        monkeypatch.setattr(hook, "run_lint", unavailable)
+        assert hook.run_cli(str(tmp_path), "a.md") == 1
+        out, err = capsys.readouterr()
+        assert out == ""
+        assert err == "lint_changed.py: could not lint a.md: docker not found on PATH\n"
 
 
 class TestHTTPPathIsGone:
@@ -117,10 +222,8 @@ class TestResultParsing:
 
     def test_unparsable_document_is_unavailable_not_guessed(self, hook, monkeypatch, tmp_path):
         """A malformed result is never reported as a finding; it makes the file unverified."""
-        lint_sh = tmp_path / "lint.sh"
-        lint_sh.touch()
-        monkeypatch.setattr(hook, "_lint_sh_path", lambda: lint_sh)
-        monkeypatch.setattr(hook.shutil, "which", lambda _name: "/usr/bin/bash")
+        (tmp_path / "lint.sh").touch()
+        monkeypatch.setattr(hook.shutil, "which", lambda _name: "/usr/bin/docker")
 
         class _Proc:
             stdout = f"{hook.FILE_MARKER}a.py\nthis is not json\n"
@@ -129,53 +232,59 @@ class TestResultParsing:
 
         monkeypatch.setattr(hook.subprocess, "run", lambda *_a, **_k: _Proc())
         with pytest.raises(hook.LintUnavailable, match="no readable result"):
-            hook.run_lint(Path("/p"), ["a.py"])
+            hook.run_lint(tmp_path, ["a.py"])
 
-    def test_missing_lint_sh_is_unavailable(self, hook, monkeypatch):
-        monkeypatch.setattr(hook, "_lint_sh_path", lambda: Path("/nonexistent/lint.sh"))
+    def test_missing_lint_sh_is_unavailable(self, hook, monkeypatch, tmp_path):
+        monkeypatch.setattr(hook.shutil, "which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr(hook, "scripts_dir", lambda: tmp_path)
         with pytest.raises(hook.LintUnavailable, match="lint.sh not found"):
             hook.run_lint(Path("/p"), ["a.py"])
 
-    def test_missing_bash_is_unavailable(self, hook, monkeypatch, tmp_path):
-        lint_sh = tmp_path / "lint.sh"
-        lint_sh.touch()
-        monkeypatch.setattr(hook, "_lint_sh_path", lambda: lint_sh)
+    def test_docker_error_is_named_in_the_notice(self, hook, monkeypatch, tmp_path):
+        """A daemon or pull failure prints before any marker; that line is the reason, not lint.sh's output."""
+        monkeypatch.setattr(hook.shutil, "which", lambda _name: "/usr/bin/docker")
+
+        class _Proc:
+            stdout = ""
+            stderr = "Unable to find image 'x:1' locally\ndocker: Error response from daemon: pull access denied.\n"
+            returncode = 125
+
+        monkeypatch.setattr(hook.subprocess, "run", lambda *_a, **_k: _Proc())
+        with pytest.raises(hook.LintUnavailable) as caught:
+            hook.run_lint(tmp_path, ["a.py"])
+        assert str(caught.value) == (
+            "the ephemeral container produced no readable result "
+            "(exit status 125: docker: Error response from daemon: pull access denied.)"
+        )
+
+    def test_missing_docker_is_unavailable(self, hook, monkeypatch):
+        """When docker is missing, LintUnavailable is raised."""
         monkeypatch.setattr(hook.shutil, "which", lambda _name: None)
-        with pytest.raises(hook.LintUnavailable, match="bash not found"):
+        with pytest.raises(hook.LintUnavailable, match="docker not found"):
             hook.run_lint(Path("/p"), ["a.py"])
 
     def test_subprocess_failure_is_unavailable(self, hook, monkeypatch, tmp_path):
-        lint_sh = tmp_path / "lint.sh"
-        lint_sh.touch()
-        monkeypatch.setattr(hook, "_lint_sh_path", lambda: lint_sh)
-        monkeypatch.setattr(hook.shutil, "which", lambda _name: "/usr/bin/bash")
+        (tmp_path / "lint.sh").touch()
+        monkeypatch.setattr(hook.shutil, "which", lambda _name: "/usr/bin/docker")
 
         def _boom(*_args, **_kwargs):
             raise OSError("no such binary")
 
         monkeypatch.setattr(hook.subprocess, "run", _boom)
         with pytest.raises(hook.LintUnavailable, match="could not be started"):
-            hook.run_lint(Path("/p"), ["a.py"])
+            hook.run_lint(tmp_path, ["a.py"])
 
 
-class TestLocalRun:
-    """Tests for local lint.sh execution (no Docker)."""
+class TestDockerRun:
+    """Tests for docker execution."""
 
-    def test_lint_program_contains_no_docker_reference(self, hook):
-        """The program must not reference Docker."""
-        program = hook.lint_program()
-        assert "docker" not in program.lower()
-
-    def test_run_lint_calls_bash_with_cwd(self, hook, monkeypatch, tmp_path):
-        """run_lint invokes bash with scope_root as cwd."""
-        lint_sh = tmp_path / "lint.sh"
-        lint_sh.touch()
-        monkeypatch.setattr(hook, "_lint_sh_path", lambda: lint_sh)
-
+    def test_run_lint_calls_docker(self, hook, monkeypatch, tmp_path):
+        """run_lint invokes docker with the right argv."""
+        (tmp_path / "lint.sh").touch()
         calls = []
 
         def mock_run(*args, **kwargs):
-            calls.append((args[0], kwargs.get("cwd")))
+            calls.append((args[0], kwargs))
 
             class _Proc:
                 stdout = f'{hook.FILE_MARKER}a.py\n{{"checks": {{}}}}\n'
@@ -185,25 +294,24 @@ class TestLocalRun:
             return _Proc()
 
         monkeypatch.setattr(hook.subprocess, "run", mock_run)
-        monkeypatch.setattr(hook.shutil, "which", lambda _: "/usr/bin/bash")
+        monkeypatch.setattr(hook.shutil, "which", lambda _: "/usr/bin/docker")
 
         assert hook.run_lint(tmp_path, ["a.py"]) == [("a.py", {"checks": {}}, "")]
 
-        assert calls == [(["bash", "-c", hook.lint_program(), "_", str(lint_sh), "a.py"], tmp_path)]
+        assert calls[0][0] == hook.build_docker_argv(tmp_path, ["a.py"])
+        assert calls[0][1]["timeout"] == hook.RUN_TIMEOUT_SECONDS
 
     def test_run_lint_handles_timeout(self, hook, monkeypatch, tmp_path):
         """A timeout makes the file unverified, never a silent pass."""
-        lint_sh = tmp_path / "lint.sh"
-        lint_sh.touch()
-        monkeypatch.setattr(hook, "_lint_sh_path", lambda: lint_sh)
-        monkeypatch.setattr(hook.shutil, "which", lambda _: "/usr/bin/bash")
+        (tmp_path / "lint.sh").touch()
+        monkeypatch.setattr(hook.shutil, "which", lambda _: "/usr/bin/docker")
 
         def mock_run(*_args, **_kwargs):
-            raise subprocess.TimeoutExpired("bash", 120)
+            raise subprocess.TimeoutExpired("docker", 300)
 
         monkeypatch.setattr(hook.subprocess, "run", mock_run)
 
-        with pytest.raises(hook.LintUnavailable, match="did not finish within 120 s"):
+        with pytest.raises(hook.LintUnavailable, match="ephemeral container did not finish within 300 s"):
             hook.run_lint(tmp_path, ["a.py"])
 
 
@@ -539,12 +647,29 @@ class TestFailingLines:
 
 
 class TestHookSettings:
-    """--set/--get/--unset: the search_ceiling setting. Run as a real subprocess against a
+    """--set/--get/--unset: the image and search_ceiling settings. Run as a real subprocess against a
     temporary changes.db so the argv-gated CLI branch ahead of main()'s stdin read is exercised
     for real, not just the underlying functions."""
 
     def _cli_env(self, tmp_path):
         return {**os.environ, "XDG_STATE_HOME": str(tmp_path)}
+
+    def test_set_then_get_round_trips_image(self, tmp_path):
+        env = self._cli_env(tmp_path)
+        image = "local/multilint:dev"
+        subprocess.run(
+            [sys.executable, str(HOOK_PATH), "--set", "image", image],
+            env=env,
+            check=True,
+        )
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH), "--get", "image"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        assert result.stdout.strip() == image
 
     def test_set_then_get_round_trips_search_ceiling(self, tmp_path):
         env = self._cli_env(tmp_path)
@@ -563,7 +688,24 @@ class TestHookSettings:
         )
         assert result.stdout.strip() == ceiling
 
-    def test_unset_removes_the_value(self, tmp_path):
+    def test_unset_removes_image(self, tmp_path):
+        env = self._cli_env(tmp_path)
+        subprocess.run(
+            [sys.executable, str(HOOK_PATH), "--set", "image", "local/test:img"],
+            env=env,
+            check=True,
+        )
+        subprocess.run([sys.executable, str(HOOK_PATH), "--unset", "image"], env=env, check=True)
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH), "--get", "image"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        assert result.stdout.strip() == ""
+
+    def test_unset_removes_search_ceiling(self, tmp_path):
         env = self._cli_env(tmp_path)
         ceiling = str(tmp_path / "ceiling")
         subprocess.run(
@@ -581,10 +723,10 @@ class TestHookSettings:
         )
         assert result.stdout.strip() == ""
 
-    def test_unknown_key_is_rejected_and_nothing_is_written(self, tmp_path):
+    def test_unknown_key_is_rejected(self, tmp_path):
         env = self._cli_env(tmp_path)
         result = subprocess.run(
-            [sys.executable, str(HOOK_PATH), "--set", "image", "x"],
+            [sys.executable, str(HOOK_PATH), "--set", "nonexistent", "x"],
             capture_output=True,
             text=True,
             env=env,
@@ -593,7 +735,7 @@ class TestHookSettings:
         db_path = tmp_path / "multilint" / "changes.db"
         if db_path.exists():
             with sqlite3.connect(db_path) as connection:
-                row = connection.execute("SELECT 1 FROM settings WHERE key = ?", ("image",)).fetchone()
+                row = connection.execute("SELECT 1 FROM settings WHERE key = ?", ("nonexistent",)).fetchone()
                 assert row is None
 
     def test_relative_xdg_state_home_is_ignored(self, hook, tmp_path, monkeypatch):
@@ -608,14 +750,14 @@ class TestHookSettings:
         (tmp_path / "multilint").mkdir()
         (tmp_path / "multilint" / "changes.db").write_bytes(b"not a sqlite database" * 100)
         result = subprocess.run(
-            [sys.executable, str(HOOK_PATH), "--get", "search_ceiling"],
+            [sys.executable, str(HOOK_PATH), "--get", "image"],
             capture_output=True,
             text=True,
             env=self._cli_env(tmp_path),
         )
         assert result.returncode == 0
         assert result.stdout == ""
-        assert "could not read the 'search_ceiling' setting" in result.stderr
+        assert "could not read the 'image' setting" in result.stderr
 
     def test_resolvers_default_when_no_row_exists(self, hook, tmp_path, monkeypatch):
         """Absent db/table/row all resolve to the built-in default, not an error."""
@@ -636,6 +778,7 @@ class TestNoEnvironmentInfluence:
         monkeypatch.delenv("MULTILINT_STATE_DIR", raising=False)
         baseline_ceiling = hook.search_ceiling()
         baseline_state_dir = hook.state_dir()
+        baseline_image = hook.resolve_image()
 
         monkeypatch.setenv("MULTILINT_IMAGE", "local/other:dev")
         monkeypatch.setenv("MULTILINT_SEARCH_CEILING", str(tmp_path / "elsewhere"))
@@ -643,6 +786,7 @@ class TestNoEnvironmentInfluence:
 
         assert hook.search_ceiling() == baseline_ceiling
         assert hook.state_dir() == baseline_state_dir
+        assert hook.resolve_image() == baseline_image
 
 
 class TestFindingsNotice:
@@ -775,19 +919,19 @@ class TestEveryLintableTypeReachesLint:
         assert "MD009" in context
 
     def test_unavailable_lint_is_reported_not_silent(self, hook, tmp_path, monkeypatch):
-        """When lint.sh cannot run, Claude is told the file is unverified; the edit still succeeds."""
+        """When docker cannot run, Claude is told the file is unverified; the edit still succeeds."""
         repo = _git_repo(tmp_path)
         (repo / "sample.py").write_text("x = 1\n", encoding="utf-8")
         payload = {"tool_name": "Write", "cwd": str(repo), "tool_input": {"file_path": str(repo / "sample.py")}}
 
         code, _calls, out = _drive_hook(
-            hook, monkeypatch, tmp_path, payload, hook.LintUnavailable("bash not found on PATH")
+            hook, monkeypatch, tmp_path, payload, hook.LintUnavailable("docker not found on PATH")
         )
 
         output = json.loads(out)
         assert code == 0
         assert output["hookSpecificOutput"]["additionalContext"] == (
-            "multilint could not lint sample.py: bash not found on PATH. Treat the file as unverified."
+            "multilint could not lint sample.py: docker not found on PATH. Treat the file as unverified."
         )
         assert output["systemMessage"] == "multilint: could not lint"
 
@@ -797,7 +941,7 @@ class TestEveryLintableTypeReachesLint:
         (repo / "sample.py").write_text("x = 1\n", encoding="utf-8")
         payload = {"tool_name": "Write", "cwd": str(repo), "tool_input": {"file_path": str(repo / "sample.py")}}
 
-        _drive_hook(hook, monkeypatch, tmp_path, payload, hook.LintUnavailable("bash not found on PATH"))
+        _drive_hook(hook, monkeypatch, tmp_path, payload, hook.LintUnavailable("docker not found on PATH"))
         _code, calls, _out = _drive_hook(hook, monkeypatch, tmp_path, payload)
         assert len(calls) == 1, "an identical save after a failed lint was treated as unchanged"
         _code, calls, _out = _drive_hook(hook, monkeypatch, tmp_path, payload)
