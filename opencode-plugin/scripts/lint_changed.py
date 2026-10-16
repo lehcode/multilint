@@ -50,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -172,6 +173,9 @@ def write_setting(key: str, value: str) -> None:
     # A relative ceiling would resolve against whatever directory the hook happens to run in.
     if key == "search_ceiling" and not Path(value).expanduser().is_absolute():
         raise ValueError(f"invalid value for {key!r}: must be an absolute path (or start with ~)")
+    # The image lands in docker's argv; a leading '-' would be parsed as a docker option.
+    if key == "image" and (value.startswith("-") or any(c.isspace() for c in value)):
+        raise ValueError(f"invalid value for {key!r}: an image reference cannot start with '-' or contain spaces")
     connection = open_state()
     if connection is None:
         raise ValueError(f"could not open the settings database at {state_dir() / 'changes.db'}")
@@ -236,10 +240,27 @@ def scripts_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def build_docker_argv(scope_root: Path, relative_paths: list[str], image: str | None = None) -> list[str]:
+def bind_mount(source: str, target: str) -> str:
+    """A read-only `--mount` spec. Docker parses it as CSV, so a path holding ',' or '"' is quoted."""
+
+    def field(key: str, value: str) -> str:
+        text = f"{key}={value}"
+        return '"' + text.replace('"', '""') + '"' if ("," in text or '"' in text) else text
+
+    return ",".join(["type=bind", field("source", source), field("target", target), "readonly"])
+
+
+def container_name() -> str:
+    """A unique name, so a timed-out container can be found and removed."""
+    return f"multilint-{os.getpid()}-{secrets.token_hex(4)}"
+
+
+def build_docker_argv(
+    scope_root: Path, relative_paths: list[str], image: str | None = None, name: str | None = None
+) -> list[str]:
     """Assemble the full `docker run` argv.
 
-    Kept free of side effects so tests can assert on the exact arguments without Docker present.
+    Runs nothing, so tests can assert on the exact arguments without Docker present.
 
     Two mounts are used:
 
@@ -259,6 +280,8 @@ def build_docker_argv(scope_root: Path, relative_paths: list[str], image: str | 
         "docker",
         "run",
         "--rm",
+        "--name",
+        name or container_name(),
         # No linter needs the network. gitleaks reads local history; every other tool reads files.
         "--network",
         "none",
@@ -268,9 +291,9 @@ def build_docker_argv(scope_root: Path, relative_paths: list[str], image: str | 
         CPU_LIMIT,
         # Identity mount: source root at the same path inside the container.
         "--mount",
-        f"type=bind,source={root},target={root},readonly",
+        bind_mount(root, root),
         "--mount",
-        f"type=bind,source={scripts_dir()},target={CONTAINER_SCRIPTS},readonly",
+        bind_mount(str(scripts_dir()), CONTAINER_SCRIPTS),
         "--workdir",
         root,
         # lint.sh resolves .multilint.json and .markdownlint.json relative to the working directory,
@@ -567,15 +590,22 @@ def run_lint(scope_root: Path, relative_paths: list[str]) -> list[tuple[str, dic
     lint_sh = scripts_dir() / "lint.sh"
     if not lint_sh.exists():
         raise LintUnavailable(f"lint.sh not found at {lint_sh}")
+    name = container_name()
     try:
         proc = subprocess.run(
-            build_docker_argv(scope_root, relative_paths),
+            build_docker_argv(scope_root, relative_paths, name=name),
             capture_output=True,
             text=True,
             check=False,
             timeout=RUN_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
+        # Killing the docker client leaves the container running; remove it by name. Best effort: a
+        # failed removal must not replace the notice with a crash.
+        try:
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
         raise LintUnavailable(f"the ephemeral container did not finish within {RUN_TIMEOUT_SECONDS} s") from None
     except (OSError, subprocess.SubprocessError) as exc:
         raise LintUnavailable(f"docker could not be started: {exc}") from None
@@ -928,7 +958,10 @@ def run_cli(root: str, target: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 4 and sys.argv[1] == "--run":
+    if sys.argv[1:2] == ["--run"]:
+        if len(sys.argv) != 4:
+            print("lint_changed.py: usage: --run ROOT TARGET", file=sys.stderr)
+            sys.exit(1)
         sys.exit(run_cli(sys.argv[2], sys.argv[3]))
     if sys.argv[1:] and sys.argv[1] in ("--set", "--get", "--unset"):
         sys.exit(run_settings_cli(sys.argv[1:]))
