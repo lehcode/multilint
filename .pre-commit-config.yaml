@@ -25,7 +25,7 @@ repos:
         entry: scripts/sync-core.sh --check
         language: system
         pass_filenames: false
-        files: '^(core|claude-plugin/scripts)/'
+        files: '^(core|claude-plugin/scripts|opencode-plugin/scripts)/'
 
       - id: bash-syntax
         name: Bash syntax check

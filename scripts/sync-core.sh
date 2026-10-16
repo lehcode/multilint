@@ -23,11 +23,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(git rev-parse --show-toplevel)" && pwd)"
 
 # Target directories that receive committed copies of core/ files.
-# claude-plugin/scripts is the only target for T1; opencode-plugin/scripts
-# can be appended here in T3.
+# Every plugin ships its own copy, because an installed plugin runs no build step.
 TARGETS=(
     "${REPO_ROOT}/claude-plugin/scripts"
-    # "${REPO_ROOT}/opencode-plugin/scripts"
+    "${REPO_ROOT}/opencode-plugin/scripts"
 )
 
 # Collect every regular file directly under core/ (no subdirectories).
