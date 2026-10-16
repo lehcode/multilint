@@ -14,6 +14,10 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # The npm package lives in opencode-plugin/, beside the Claude Code plugin.
+    defaults:
+      run:
+        working-directory: opencode-plugin
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -26,6 +30,7 @@ jobs:
           # NODE_AUTH_TOKEN is read from; without it the publish is anonymous.
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
+          cache-dependency-path: opencode-plugin/package-lock.json
 
       # The npm bundled with Node 22 predates `npm stage`, so the staging step
       # fails with `Unknown command: "stage"`. Upgrade before using it.

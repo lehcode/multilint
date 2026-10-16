@@ -1,7 +1,7 @@
 {
   "name": "@lehcode/multilint",
   "version": "0.2.1",
-  "description": "Provides agentic linting behavior by auto-registering the Multilint MCP server dual-mode plugin for OpenCode V1/V2.",
+  "description": "OpenCode plugin that lints each edited file on the host with multilint. Missing linters are reported as skipped.",
   "keywords": [
     "lint",
     "agent",
@@ -20,25 +20,23 @@
   "type": "module",
   "exports": {
     ".": {
-      "types": "./dist/dual.d.ts",
-      "import": "./dist/dual.js"
+      "types": "./dist/plugin.d.ts",
+      "import": "./dist/plugin.js"
     }
   },
-  "main": "./dist/dual.js",
-  "types": "./dist/dual.d.ts",
-  "directories": {
-    "doc": "doc",
-    "test": "tests"
-  },
+  "main": "./dist/plugin.js",
+  "types": "./dist/plugin.d.ts",
   "files": [
     "dist/",
+    "scripts/",
     "agents/"
   ],
   "scripts": {
-    "build:js": "esbuild src/dual.ts --bundle --platform=node --minify --format=esm --external:@opencode/plugin --outfile=dist/dual.js",
+    "build:js": "esbuild src/plugin.ts --bundle --platform=node --minify --format=esm --external:@opencode/plugin --outfile=dist/plugin.js",
     "build:types": "tsc -p tsconfig.json",
     "build": "npm run build:js && npm run build:types",
-    "build:watch": "esbuild src/dual.ts --bundle --platform=node --format=esm --external:@opencode/plugin --outfile=dist/dual.js --watch",
+    "test": "bun test tests",
+    "build:watch": "esbuild src/plugin.ts --bundle --platform=node --format=esm --external:@opencode/plugin --outfile=dist/plugin.js --watch",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {},

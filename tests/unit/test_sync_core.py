@@ -33,15 +33,18 @@ class TestSyncCheck:
         assert result.stderr.strip() == ""
 
 
+TARGET_PLUGINS = ("claude-plugin", "opencode-plugin")
+
+
 class TestSyncDriftDetection:
     """Drift detection in an isolated tmp repo."""
 
     @pytest.fixture
     def tmp_repo(self, tmp_path):
-        """A temporary git repo with core/, scripts/sync-core.sh, and target dir.
+        """A temporary git repo with core/, scripts/sync-core.sh, and both in-sync target dirs.
 
-        The sync script resolves repo root via git rev-parse --show-toplevel and
-        targets are fixed to 'claude-plugin/scripts' relative to that root.
+        The sync script resolves repo root via git rev-parse --show-toplevel; its targets are
+        claude-plugin/scripts and opencode-plugin/scripts relative to that root.
         """
         core_dir = tmp_path / "core"
         core_dir.mkdir()
@@ -49,13 +52,15 @@ class TestSyncDriftDetection:
         scripts_dir = tmp_path / "scripts"
         scripts_dir.mkdir()
 
-        target_dir = tmp_path / "claude-plugin" / "scripts"
-        target_dir.mkdir(parents=True)
+        targets = [tmp_path / plugin / "scripts" for plugin in TARGET_PLUGINS]
+        for target_dir in targets:
+            target_dir.mkdir(parents=True)
 
         # Copy core files into tmp repo
         for f in ("lint.sh", "lint_changed.py", "multilint.sh", "multilint_config.py"):
             (core_dir / f).write_text(f"content-{f}\n", encoding="utf-8")
-            (target_dir / f).write_text(f"content-{f}\n", encoding="utf-8")
+            for target_dir in targets:
+                (target_dir / f).write_text(f"content-{f}\n", encoding="utf-8")
 
         # Copy sync script into scripts/
         sync_dest = scripts_dir / "sync-core.sh"
@@ -72,9 +77,20 @@ class TestSyncDriftDetection:
 
         return tmp_path
 
-    def test_modified_plugin_copy_detected(self, tmp_repo):
+    def test_fixture_starts_in_sync(self, tmp_repo):
+        """Guards the tests below: any drift they see is the drift they introduced."""
+        result = subprocess.run(
+            ["bash", str(tmp_repo / "scripts" / "sync-core.sh"), "--check"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_repo,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    @pytest.mark.parametrize("plugin", TARGET_PLUGINS)
+    def test_modified_plugin_copy_detected(self, tmp_repo, plugin):
         """Modifying a target copy triggers --check exit 1 with the file named."""
-        target_dir = tmp_repo / "claude-plugin" / "scripts"
+        target_dir = tmp_repo / plugin / "scripts"
         (target_dir / "lint.sh").write_text("MODIFIED\n", encoding="utf-8")
 
         result = subprocess.run(
@@ -84,7 +100,7 @@ class TestSyncDriftDetection:
             cwd=tmp_repo,
         )
         assert result.returncode == 1
-        assert "drift:" in result.stderr
+        assert f"{plugin}/scripts/lint.sh" in result.stderr
 
     def test_extra_file_detected(self, tmp_repo):
         """An extra file in target is reported as drift."""
