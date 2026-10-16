@@ -79,8 +79,15 @@ class TestContainerProgram:
 class TestImageResolution:
     """DEFAULT_IMAGE and resolve_image()."""
 
-    def test_default_image(self, hook):
-        assert hook.DEFAULT_IMAGE == "lehcode/multilint:v0.2.1"
+    def test_default_image_is_a_pinned_release_tag(self, hook):
+        """A release tag, never :latest; release-please rewrites the version, so match the shape."""
+        assert re.fullmatch(r"lehcode/multilint:v\d+\.\d+\.\d+", hook.DEFAULT_IMAGE)
+
+    @pytest.mark.parametrize("value", ["--privileged", "-v", "bad image"])
+    def test_image_setting_rejects_docker_options_and_spaces(self, hook, monkeypatch, tmp_path, value):
+        monkeypatch.setattr(hook, "state_dir", lambda: tmp_path / "state")
+        with pytest.raises(ValueError, match="cannot start with '-'"):
+            hook.write_setting("image", value)
 
     def test_default_image_has_version_marker(self, hook):
         source = HOOK_PATH.read_text(encoding="utf-8")
@@ -107,10 +114,12 @@ class TestDockerArgv:
     def test_exact_argv(self, hook, monkeypatch, tmp_path):
         monkeypatch.setattr(hook, "read_setting", lambda key: None)
         scripts = hook.scripts_dir()
-        assert hook.build_docker_argv(tmp_path, ["a.py", "b.sh"]) == [
+        assert hook.build_docker_argv(tmp_path, ["a.py", "b.sh"], name="multilint-1-ab") == [
             "docker",
             "run",
             "--rm",
+            "--name",
+            "multilint-1-ab",
             "--network",
             "none",
             "--memory",
@@ -134,6 +143,16 @@ class TestDockerArgv:
             "a.py",
             "b.sh",
         ]
+
+    def test_mount_spec_quotes_csv_special_characters(self, hook):
+        """docker parses --mount as CSV: an unquoted ',' in a path would split it into bogus keys."""
+        assert hook.bind_mount("/a/b", "/t") == "type=bind,source=/a/b,target=/t,readonly"
+        assert hook.bind_mount("/a,b", "/t") == 'type=bind,"source=/a,b",target=/t,readonly'
+        assert hook.bind_mount('/a"b', "/t") == 'type=bind,"source=/a""b",target=/t,readonly'
+
+    def test_each_container_gets_a_unique_name(self, hook):
+        assert hook.container_name() != hook.container_name()
+        assert hook.container_name().startswith("multilint-")
 
     def test_scripts_dir_holds_lint_sh(self, hook):
         assert (hook.scripts_dir() / "lint.sh").is_file()
@@ -166,6 +185,19 @@ class TestRunCli:
         assert json.loads(out) == {"checks": {"markdownlint": {"status": "failed"}}}
         assert err == "MD009 a.md:1\n"
         assert calls == [(tmp_path.resolve(), ["a.md"])]
+
+    def test_run_without_both_operands_is_a_usage_error_not_a_hook_run(self, tmp_path):
+        """A short --run must not fall through to the hook, which would block reading stdin."""
+        proc = subprocess.run(
+            [sys.executable, str(HOOK_PATH), "--run", str(tmp_path)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")},
+        )
+        assert proc.returncode == 1
+        assert proc.stderr == "lint_changed.py: usage: --run ROOT TARGET\n"
 
     def test_unavailable_exits_1_with_the_reason(self, hook, monkeypatch, capsys, tmp_path):
         def unavailable(_root, _paths):
@@ -298,7 +330,8 @@ class TestDockerRun:
 
         assert hook.run_lint(tmp_path, ["a.py"]) == [("a.py", {"checks": {}}, "")]
 
-        assert calls[0][0] == hook.build_docker_argv(tmp_path, ["a.py"])
+        argv = calls[0][0]
+        assert argv == hook.build_docker_argv(tmp_path, ["a.py"], name=argv[argv.index("--name") + 1])
         assert calls[0][1]["timeout"] == hook.RUN_TIMEOUT_SECONDS
 
     def test_run_lint_handles_timeout(self, hook, monkeypatch, tmp_path):
@@ -313,6 +346,22 @@ class TestDockerRun:
 
         with pytest.raises(hook.LintUnavailable, match="ephemeral container did not finish within 300 s"):
             hook.run_lint(tmp_path, ["a.py"])
+
+    def test_timed_out_container_is_removed_by_name(self, hook, monkeypatch, tmp_path):
+        """Killing the docker client leaves the container running, so the hook removes it."""
+        monkeypatch.setattr(hook.shutil, "which", lambda _: "/usr/bin/docker")
+        calls = []
+
+        def mock_run(argv, **_kwargs):
+            calls.append(argv)
+            if argv[1] == "run":
+                raise subprocess.TimeoutExpired("docker", 300)
+
+        monkeypatch.setattr(hook.subprocess, "run", mock_run)
+        with pytest.raises(hook.LintUnavailable):
+            hook.run_lint(tmp_path, ["a.py"])
+        name = calls[0][calls[0].index("--name") + 1]
+        assert calls[1] == ["docker", "rm", "-f", name]
 
 
 class TestSkippedChecksAreSurfaced:
