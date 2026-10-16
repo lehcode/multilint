@@ -1,7 +1,8 @@
 // End-to-end tests for the OpenCode plugin: the adapters drive the real scripts/multilint.sh, which
-// lints with the host's linters. Needs bash, python3 and shellcheck on PATH.
+// lints in an ephemeral Docker container. Tests that need a lint result skip when docker or the image
+// is absent; MULTILINT_TEST_IMAGE selects a local build instead of the pinned release image.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,6 +12,14 @@ import * as pluginModule from "../src/plugin.ts";
 import { MULTILINT_SH } from "../src/lint.ts";
 
 const DEFECTIVE_SH = "#!/bin/bash\necho $1\nif [ $x = 1 ]; then echo; fi\n";
+const SCRIPTS = path.dirname(MULTILINT_SH);
+const IMAGE =
+  process.env.MULTILINT_TEST_IMAGE ||
+  execFileSync("python3", ["-c", "import sys; sys.path.insert(0, sys.argv[1]); import lint_changed; print(lint_changed.DEFAULT_IMAGE)", SCRIPTS])
+    .toString()
+    .trim();
+// Never pulled: a missing image skips the container tests instead of downloading ~500 MB.
+const withImage = spawnSync("docker", ["image", "inspect", IMAGE], { stdio: "ignore" }).status === 0 ? test : test.skip;
 
 let root: string;
 let project: string;
@@ -28,7 +37,8 @@ beforeAll(() => {
   writeFileSync(path.join(project, "..dotted.sh"), DEFECTIVE_SH);
   process.env.XDG_STATE_HOME = path.join(root, "state");
   // The hook never searches above its ceiling ($HOME by default); the temp dir is outside $HOME.
-  const lintChanged = path.join(path.dirname(MULTILINT_SH), "lint_changed.py");
+  const lintChanged = path.join(SCRIPTS, "lint_changed.py");
+  execFileSync("python3", [lintChanged, "--set", "image", IMAGE]);
   execFileSync("python3", [lintChanged, "--set", "search_ceiling", root]);
 });
 
@@ -57,7 +67,7 @@ async function runV2(input: unknown, result: unknown, directory = project) {
   return event;
 }
 
-test("V2: a defective file's findings are pushed onto the tool result", async () => {
+withImage("V2: a defective file's findings are pushed onto the tool result", async () => {
   const event = await runV2({ path: "broken.sh" }, { content: [{ type: "text", text: "Created broken.sh" }] });
   expect(event.result.content).toHaveLength(2);
   expect(event.result.content[1].text).toStartWith("<multilint>");
@@ -67,7 +77,7 @@ test("V2: a defective file's findings are pushed onto the tool result", async ()
   expect(nested.result.content[1].text).toContain("shellcheck");
 });
 
-test("V2: a relative path outside the project is not linted", async () => {
+withImage("V2: a relative path outside the project is not linted", async () => {
   const event = await runV2({ path: "../outside.sh" }, { content: [{ type: "text", text: "ok" }] });
   expect(event.result.content).toHaveLength(1);
   // The same file named by its absolute path is linted, which proves the guard above did the work.
@@ -75,12 +85,12 @@ test("V2: a relative path outside the project is not linted", async () => {
   expect(absolute.result.content[1].text).toContain("shellcheck");
 });
 
-test("V2: a file whose name starts with '..' is inside the project", async () => {
+withImage("V2: a file whose name starts with '..' is inside the project", async () => {
   const event = await runV2({ path: "..dotted.sh" }, { content: [{ type: "text", text: "ok" }] });
   expect(event.result.content[1].text).toContain("shellcheck");
 });
 
-test("V1 and module shape: default-only exports, one hook, notice appended to output", async () => {
+withImage("V1 and module shape: default-only exports, one hook, notice appended to output", async () => {
   expect(Object.keys(pluginModule)).toEqual(["default"]);
   const hooks = await plugin.server({ directory: project });
   expect(Object.keys(hooks)).toEqual(["tool.execute.after"]);

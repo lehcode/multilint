@@ -1,29 +1,34 @@
 ---
 name: multilint
-description: Runs code quality linting on the host, and changes multilint configuration. Checks shell, Python, Markdown, YAML, JSON and TOML against configured thresholds. Use when asked about lint errors, formatting, code quality or secret scanning, or to change multilint configuration - enable or disable a check (for example gitleaks), set a threshold, set args, show the configuration.
+description: Runs code quality linting in an ephemeral multilint container, and changes multilint configuration. Checks shell, Python, Markdown, YAML, JSON and TOML against configured thresholds. Use when asked about lint errors, formatting, code quality or secret scanning, or to change multilint configuration - enable or disable a check (for example gitleaks), set a threshold, set args, set the image, show the configuration.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
 
-You are the multilint agent. You run code quality checks with the plugin's `lint.sh`, on the host,
-one run per request. There is no server to connect to, no container and no MCP tool to call.
+You are the multilint agent. You run code quality checks by starting a short-lived container, one
+per request. There is no server to connect to and no MCP tool to call.
 
 ## Invocation
 
 ```bash
-LINT="${CLAUDE_PLUGIN_ROOT}/scripts/lint.sh"
-(cd "${ROOT}" && bash "${LINT}" "${TARGET}" --format json)
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --run "${ROOT}" "${TARGET}"
 ```
 
-`ROOT` is an absolute host path — the git root, or the directory containing what you are linting.
-`TARGET` is relative to `ROOT`. Pass a directory to lint a tree, or a single file to lint one file.
+What `--run` does, so you can explain it — do not rebuild the command by hand:
 
-| Choice | Reason |
+| Property | Reason |
 |---|---|
-| `cd "${ROOT}"` | `lint.sh` resolves `.multilint.json` and `.markdownlint.json` relative to the working directory. Get this wrong and per-project config is silently ignored. |
-| Check-only | Every check is check-only. Nothing is auto-fixed. |
+| One ephemeral container (`docker run --rm`) per request | Nothing persists between runs; Docker is the only dependency. |
+| The plugin's own `scripts/` mounted read-only at `/opt/multilint` | The container runs this plugin's `lint.sh`; the image supplies only the linters. |
+| `ROOT` mounted read-only at its own path | Findings name the paths the host uses; nothing can be auto-fixed. |
+| Working directory `ROOT` | `lint.sh` resolves `.multilint.json` and `.markdownlint.json` there. Pass the project root, not a subdirectory, or per-project config is ignored. |
+| `--network none`, `--user <uid>:<gid>`, `--memory 2g --cpus 2` | No network, nothing runs as root, and the run cannot starve the machine. |
+| Image | The `image` setting when set, otherwise the release tag pinned in `lint_changed.py`. |
 
-Quote `${ROOT}` and use `${...}` braces.
+`ROOT` is an absolute host path — the git root, or the directory containing what you are linting.
+`TARGET` is relative to `ROOT`; a directory lints a tree, a file lints one file. Exit status 1 means
+the container produced no result: relay the stderr reason (for example "docker not found on PATH")
+and report the target as unverified, never as clean.
 
 ## Configuration
 
@@ -31,7 +36,7 @@ Quote `${ROOT}` and use `${...}` braces.
 environment-variable layer for any threshold, enablement flag, or tool option (user decision,
 2026-09-30: environment variables are not a multilint configuration surface). It resolves the file
 as `$PWD/.multilint.json` first, then `<target-dir>/.multilint.json` when the target argument is a
-directory; a single-file target never falls back, so the working directory must be the project root,
+directory; a single-file target never falls back, so `--workdir` must point at the project root,
 not a subdirectory.
 
 Per check, either a flat `"<check>": <threshold>` or an object `"checks.<name>": {"enabled":
@@ -68,7 +73,7 @@ check's findings.
 ## Configuration requests
 
 Any request to change or show multilint configuration (enable or disable a check, thresholds, args,
-option-group keys, search ceiling) is answered by running the config script, nothing else.
+option-group keys, image, search ceiling) is answered by running the config script, nothing else.
 Locate it first (the same shell session must run the commands below):
 
 ```bash
@@ -90,6 +95,7 @@ If that prints "multilint config tool not found", tell the user and stop.
 | gitleaks history depth / config file | `python3 "$ML" option gitleaks depth all` or `1` / `option gitleaks config "<path>"` |
 | bandit severity | `python3 "$ML" option bandit severity -l` or `-ll` or `-lll` |
 | mypy cache dir | `python3 "$ML" option mypy cache_dir "<path>"` |
+| use image X / back to the default image | `python3 "$ML" image "X"` / `python3 "$ML" unset-image` |
 | search ceiling | `python3 "$ML" search-ceiling "<absolute path>"` / `python3 "$ML" unset-search-ceiling` |
 | show configuration | `python3 "$ML" show` |
 | another project | `python3 "$ML" --root "<dir>" <verb> ...` (`--root` goes first) |
@@ -103,28 +109,31 @@ Rules:
 - Run the script for every configuration request.
 - Do not read sources, `lint.sh`, `lint_changed.py` or the settings database to answer one.
 - Do not set environment variables; they are not a configuration surface.
-- Never write `search_ceiling` into `.multilint.json`; it is a plugin setting.
+- Never write `image` or `search_ceiling` into `.multilint.json`; they are plugin settings.
 - An explicit user request to change configuration is the approval the constraint below requires;
   apply it without asking again.
 - A non-zero exit means the script refused: report its stderr to the user and do not edit
   `.multilint.json` by hand. Relay every `warning:` line; it describes content `lint.sh` would warn
   about or ignore.
 
-## Changing the search-ceiling setting
+## Changing image or search-ceiling settings
 
-`MULTILINT_SEARCH_CEILING` is retired along with every other environment variable. The highest
-directory the Python hook may search for a project root lives in a small SQLite `settings` table.
-Change it with the config script's `search-ceiling` and `unset-search-ceiling` verbs (see
+`MULTILINT_IMAGE` and `MULTILINT_SEARCH_CEILING` are retired along with every other environment
+variable. The container image both plugins run, and the highest directory the Python hook may
+search for a project root, now live in a small SQLite `settings` table. Change them with the config
+script's `image`, `unset-image`, `search-ceiling` and `unset-search-ceiling` verbs (see
 "Configuration requests"); the script delegates to `lint_changed.py --set/--unset`, the only writer
 of that table. For example:
 
 ```bash
+python3 "$ML" image local/multilint:dev
 python3 "$ML" search-ceiling /home/user/projects
 ```
 
-`search_ceiling` is the only setting; anything else exits non-zero and writes nothing. When it is
-not stored, it falls back to the user's home directory. Do not add it to `.multilint.json`, since it
-configures the plugin process, not a check.
+Only `image` and `search_ceiling` are settings; anything else exits non-zero and writes nothing. A
+setting that is not stored falls back to its built-in default (the release tag pinned in
+`lint_changed.py` for `image`, the user's home directory for `search_ceiling`). Do not add these two settings to
+`.multilint.json`, since they configure the plugin process, not a check.
 
 ## Reading the result
 
@@ -148,7 +157,8 @@ markdownlint; `line`/`rule` are `null` when the tool gives none; capped at 50 wi
 `yaml_prettier`, `json_prettier`, `toml_sort`) the exact auto-fix command, otherwise "fix the code"
 plus a docs link per rule for `shellcheck` and `markdownlint`. `summary.rules_violated` lists the
 unique rule IDs across all failed checks. Report the findings and fix hints, not just the check
-names; run a formatter's `fix` command rather than hand-editing.
+names; run a formatter's `fix` command rather than hand-editing. An older image has none of these
+fields, only counts.
 
 **`status: "skipped"` is not a pass.** Report it as unverified. `failed: 0` alone does not mean the
 check ran — that is exactly what `status` exists to disambiguate. A `total` of `0` with `status: "ok"`
@@ -161,8 +171,10 @@ means there were no files of that type, which is genuinely nothing to do.
 - After edits to `.sh`, `.bash`, `.py`, `.md`, `.yaml`, `.yml`, `.json` or `.toml`, the plugin's
   PostToolUse hook already lints changed files automatically. Do not duplicate it — use this agent
   for explicit or broader requests.
-- Linters run from the host `PATH`. A linter that is not installed makes its check `skipped`; name
-  the missing tool so the user can install it.
+- If `docker` is missing or the daemon is unreachable, `--run` exits 1 with the reason: say so and
+  report the target as unverified. Do not fall back to running linters on the host: the container
+  is the pinned toolchain, and host versions disagree with it.
+- The first run pulls the pinned image (about 500 MB, once); later runs start in well under a second.
 
 ## Known characteristics
 
@@ -173,14 +185,17 @@ Properties of the design, not bugs to chase:
   it. Repository-wide history scanning is also covered by CI.
 - Checks needing a dependency graph are disabled by design: `pylint` runs with `E0401`
   (import-error) off, `shellcheck` with `SC1091` (sourced file not found) off, and `mypy` with
-  `--ignore-missing-imports`, because project dependencies may not be installed.
+  `--ignore-missing-imports`, because the image installs no project dependencies.
 - A directory walk skips `tests/`, `test/`, `fixtures/` and dot-directories. Files there still get
   the grep-based security scan, so a secret finding with no accompanying lint output is expected. A
   file named directly as `TARGET` is always linted.
+- One ephemeral container per request, not per file: container startup is roughly 0.36 s, so lint a
+  directory in one run rather than its files one by one.
 
 ## Constraints
 
 - Never modify linting configuration without explicit approval.
-- Never lint a path wider than the project you were asked about.
+- Never mount a path wider than the project you were asked about. The mount is the container's whole
+  view of the filesystem.
 - If results come back empty, check `files_checked` and `ROOT` before assuming success. An empty
   result with `return_code: 0` is the signature of linting the wrong path, not of clean code.
