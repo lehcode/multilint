@@ -610,6 +610,24 @@ def resolve_edited_file(payload: dict) -> Path | None:
     return edited
 
 
+def forget_change(path: Path) -> None:
+    """Drop the digest recorded for `path`, so saving the same bytes again is linted again.
+
+    Called when the lint could not run: the digest was recorded before linting, and keeping it would
+    turn the next identical save into a silent "unchanged" for a file that was never verified.
+    """
+    state = open_state()
+    if state is None:
+        return
+    try:
+        state.execute("DELETE FROM seen WHERE path = ?", (str(path),))
+        state.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        state.close()
+
+
 def changed_scope_root(edited: Path) -> Path | None:
     """Scope root to lint in, or None when the file's content is the same as last time."""
     # One connection for the whole invocation: the git-root cache and the digest record both use it,
@@ -741,6 +759,7 @@ def main() -> int:
     try:
         results = run_lint(scope_root, [relative])
     except LintUnavailable as exc:
+        forget_change(edited)
         emit([f"multilint could not lint {relative}: {exc}. Treat the file as unverified."], "could not lint")
         return 0
 
