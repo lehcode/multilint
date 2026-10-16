@@ -163,11 +163,6 @@ class TestLocalRun:
         program = hook.lint_program()
         assert "docker" not in program.lower()
 
-    def test_run_lint_returns_empty_list_when_lint_sh_missing(self, hook, monkeypatch, tmp_path):
-        """Missing lint.sh is treated as an infrastructure issue, not a test failure."""
-        monkeypatch.setattr(hook, "_lint_sh_path", lambda: Path("/nonexistent/lint.sh"))
-        assert hook.run_lint(Path(tmp_path), ["file.py"]) == []
-
     def test_run_lint_calls_bash_with_cwd(self, hook, monkeypatch, tmp_path):
         """run_lint invokes bash with scope_root as cwd."""
         lint_sh = tmp_path / "lint.sh"
@@ -190,11 +185,7 @@ class TestLocalRun:
 
         hook.run_lint(tmp_path, ["a.py"])
 
-        assert len(calls) == 1
-        argv, cwd = calls[0]
-        assert argv[0] == "bash"
-        assert argv[1] == "-c"
-        assert cwd == tmp_path
+        assert calls == [(["bash", "-c", hook.lint_program(), "_", str(lint_sh), "a.py"], tmp_path)]
 
     def test_run_lint_handles_timeout(self, hook, monkeypatch, tmp_path):
         """A timeout is treated as an infrastructure issue, not a test failure."""

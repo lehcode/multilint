@@ -122,6 +122,20 @@ _CHECK_TO_BINARY = {
 }
 
 
+def assert_flagged(result, expected_check):
+    """The notice names the check: as failing when its linter is installed, else as unverified.
+
+    A defective file never produces no notice: that is the silent skip these tests exist to catch.
+    """
+    assert result is not None, "hook produced no notice for a defective file"
+    ctx = result["hookSpecificOutput"]["additionalContext"]
+    assert expected_check in ctx, f"expected check {expected_check!r} not in context: {ctx}"
+    if shutil.which(_CHECK_TO_BINARY[expected_check]) is not None:
+        assert "failed" in ctx or "failing" in ctx, f"no failure indicator in context: {ctx}"
+    else:
+        assert "unverified" in ctx, f"expected {expected_check!r} to be listed as unverified, got: {ctx}"
+
+
 @pytest.mark.parametrize(
     "suffix,content,expected_check",
     [
@@ -136,37 +150,10 @@ _CHECK_TO_BINARY = {
     ],
 )
 def test_defective_file(suffix, content, expected_check, repo, hook_env):
-    """A defective file of each type either fails the check or reports it as skipped.
-
-    If the required linter is not on the host PATH, lint.sh reports the check as skipped rather
-    than as failed.
-    """
+    """A defective file of each type fails the check, or reports it as skipped when its linter is missing."""
     rel = f"sample{suffix}"
     (repo / rel).write_text(content, encoding="utf-8")
-    result = run_hook(repo, rel, hook_env)
-
-    # Main entry point may return None if the file is unchanged or unsupported
-    if result is None:
-        pytest.skip(f"hook returned no JSON for {suffix}")
-        return
-
-    ctx = result["hookSpecificOutput"]["additionalContext"]
-
-    # Check whether the required linter is available
-    binary = _CHECK_TO_BINARY.get(expected_check, expected_check)
-    linter_available = shutil.which(binary) is not None
-
-    if linter_available:
-        # Linter is available: the check must either fail or be mentioned
-        assert expected_check in ctx, f"expected check {expected_check!r} not in context: {ctx}"
-        # Accept "failed", "failing", or "✗" as a failure indicator
-        has_failure_keyword = "failed" in ctx or "failing" in ctx or "✗" in ctx
-        assert has_failure_keyword, f"no failure indicator in context: {ctx}"
-    else:
-        # Linter is not available: the check should be reported as skipped
-        assert (
-            expected_check in ctx and "unverified" in ctx
-        ), f"expected {expected_check!r} to be listed as unverified/skipped, got: {ctx}"
+    assert_flagged(run_hook(repo, rel, hook_env), expected_check)
 
 
 # ---------------------------------------------------------------------------
@@ -226,15 +213,4 @@ def test_edited_file_in_walk_excluded_directory_is_linted(relative, content, exp
     """
     (repo / relative).parent.mkdir(parents=True)
     (repo / relative).write_text(content, encoding="utf-8")
-    result = run_hook(repo, relative, hook_env)
-    assert result is not None, f"hook produced no notice for {relative}"
-    ctx = result["hookSpecificOutput"]["additionalContext"]
-
-    # Check whether the required linter is available
-    binary = _CHECK_TO_BINARY.get(expected_check, expected_check)
-    if shutil.which(binary) is not None:
-        # Linter is available: the check must be mentioned in the output
-        assert expected_check in ctx, f"expected check {expected_check!r} not in context: {ctx}"
-    else:
-        # Linter is not available: the check should still be mentioned (as skipped)
-        assert expected_check in ctx, f"expected check {expected_check!r} not in context: {ctx}"
+    assert_flagged(run_hook(repo, relative, hook_env), expected_check)
