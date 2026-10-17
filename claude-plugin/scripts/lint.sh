@@ -1177,9 +1177,11 @@ else
     info "Checking for hardcoded secrets in Python files..."
     # shellcheck disable=SC2043
     for f in "${py_files[@]}"; do
-        # Skip server/mcp/test/init files (docstrings/strings contain pattern keywords)
+        # Skip test/init files (docstrings/strings contain pattern keywords)
+        # Was: server.py|mcp_server.py|test_*.py|__init__.py) -- the first two quieted multilint's own,
+        # since removed, service files and hid secrets in any user file with those names.
         case "$(basename "$f")" in
-            server.py|mcp_server.py|test_*.py|__init__.py) continue ;;
+            test_*.py|__init__.py) continue ;;
         esac
         # Skip test fixture directories
         case "$f" in
