@@ -20,12 +20,9 @@
 # --- Test runner ---------------------------------------------------------------
 # pytest-asyncio is required because pytest.ini sets asyncio_mode = auto.
 # pytest-mock is imported directly by tests/conftest.py.
-# fastmcp is imported by mcp_server.py, which tests/unit/test_mcp_server.py
-# exercises; it pulls in mcp transitively.
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-mock==3.16.0
-fastmcp==4.0.10
 
 # --- Linters run in CI --------------------------------------------------------
 # Flags live in lint.sh; these are the tools behind them.

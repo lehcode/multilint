@@ -65,7 +65,7 @@ jobs:
 
       # Selected by path, not by `-m unit`: pytest.ini declares the marker but no
       # test applies it, so `-m unit` would collect nothing. tests/integration/
-      # needs a live HTTP server and stays off the PR path.
+      # needs Docker and the toolchain image and stays off the PR path.
       - name: Run unit tests
         run: python -m pytest tests/unit -q
 

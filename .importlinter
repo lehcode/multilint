@@ -1,5 +1,5 @@
 # import-linter contracts for the test suites.
-# The root is `tests` because it is the repo's only package: server.py and mcp_server.py are
+# The root is `tests` because it is the repo's only package: the core/*.py scripts are
 # single-file modules, and import-linter rejects modules as root packages.
 
 [importlinter]

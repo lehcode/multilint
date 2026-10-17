@@ -2,19 +2,12 @@
 """Shared pytest fixtures for multilint tests."""
 
 import json
-import os
-import socket
-import subprocess
 import tempfile
-import time
 from pathlib import Path
 from typing import Generator
 
 import pytest
 import pytest_mock
-
-SERVER_PY = Path(__file__).parent.parent / "server.py"
-LINT_SH = Path(__file__).parent.parent / "core" / "lint.sh"
 
 
 @pytest.fixture
@@ -99,90 +92,6 @@ def sample_project_with_threshold_config(tmp_dir: str) -> str:
     )
 
     return tmp_dir
-
-
-@pytest.fixture
-def http_client(tmp_dir: str) -> Generator[object, None, None]:
-    """Start a test HTTP server and provide a client."""
-    # Copy server.py into tmp dir so subprocess calls don't use host path
-    server_code = SERVER_PY.read_text()
-    # Replace the hardcoded lint.sh path with one that exists
-    server_code = server_code.replace(
-        "/home/takeshi/docker-compose.d/multilint/lint.sh",
-        str(LINT_SH),
-    )
-    (Path(tmp_dir) / "server.py").write_text(server_code)
-
-    # Start server in thread
-    port = _find_free_port()
-    proc = subprocess.Popen(
-        ["python3", str(Path(tmp_dir) / "server.py")],
-        cwd=tmp_dir,
-        env={
-            **os.environ,
-            "LINT_SERVER_PORT": str(port),
-            "LINT_SERVER_HOST": "127.0.0.1",
-            # Allow the test's own tmp dir as the only permitted run root
-            # (server default is /workspace:/multilint, which don't exist here).
-            "MULTILINT_ALLOWED_ROOTS": tmp_dir,
-        },
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    # Wait for server to be ready
-    for _ in range(30):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect(("127.0.0.1", port))
-                break
-        except ConnectionRefusedError:
-            time.sleep(0.2)
-    else:
-        proc.terminate()
-        raise RuntimeError("Server failed to start")
-
-    client = _TestClient(("127.0.0.1", port))
-
-    yield client
-
-    proc.terminate()
-    proc.wait(timeout=5)
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-class _TestClient:
-    """Simple HTTP client for testing."""
-
-    def __init__(self, addr: tuple) -> None:
-        self.addr = addr
-
-    def _request(self, method: str, path: str, body: bytes = b"", timeout: float = 5) -> dict:
-        import http.client
-
-        conn = http.client.HTTPConnection(self.addr[0], self.addr[1], timeout=timeout)
-        headers = {"Content-Type": "application/json"} if body else {}
-        conn.request(method, path, body=body, headers=headers)
-        resp = conn.getresponse()
-        raw = resp.read().decode()
-        conn.close()
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            data = raw
-        return {"status": resp.status, "headers": dict(resp.getheaders()), "body": data}
-
-    def get(self, path: str, timeout: float = 5) -> dict:
-        return self._request("GET", path, timeout=timeout)
-
-    def post(self, path: str, data: dict, timeout: float = 5) -> dict:
-        body = json.dumps(data).encode()
-        return self._request("POST", path, body=body, timeout=timeout)
 
 
 @pytest.fixture
