@@ -886,6 +886,18 @@ class TestSilentMissRegressions:
 
         assert data["checks"]["security_secrets"]["failed"] == 4
 
+    @pytest.mark.parametrize("name", ["server.py", "mcp_server.py"])
+    def test_secret_in_a_python_file_named_like_the_old_service_is_found(self, tmp_dir, name):
+        """These names were exempt from the Python secret scan to quiet multilint's own service files,
+        which hid secrets in any user file with the same name."""
+        proj = Path(tmp_dir) / "proj"
+        proj.mkdir()
+        (proj / name).write_text('API_KEY = "sk-live-abc123"\n')
+
+        data = _lint_json(proj)
+
+        assert data["checks"]["security_secrets"]["failed"] == 1
+
     @pytest.mark.skipif(shutil.which("toml-sort") is None, reason="toml-sort not installed")
     def test_sorted_toml_passes_with_default_args(self, tmp_dir):
         """The default toml_sort args used to be a flag toml-sort rejects, failing every file."""
