@@ -101,6 +101,34 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
 
 ---
 
+## ⏳ Phase 5: Reach (Postponed 2026-10-17)
+
+### 9. Standalone stdio MCP Server [P3]
+
+**Problem:** The HTTP MCP server (port 8592, persistent container) was removed with service mode. MCP clients that cannot load the Claude Code or OpenCode plugin (Cursor, Codex CLI, Gemini CLI, Zed, Claude Desktop) have no way to use multilint, and there is nothing to list in MCP registries.
+
+**Design (agreed):**
+
+- `core/mcp_server.py`, stdlib only: newline-delimited JSON-RPC 2.0 over stdin/stdout (MCP stdio transport). The client starts it per session; no port, no HTTP, no daemon.
+- One tool, `lint_files(path)`, calling `lint_changed.run_lint()`, so it uses the same ephemeral container and sandbox flags as the hook.
+- The scope root is bind-mounted, so paths outside the search ceiling (`$HOME` unless the `search_ceiling` setting overrides it) are refused, the bound the hook already uses. Unlintable types and paths with control characters are refused with a tool error; a lint that cannot run returns the "unverified" notice as `isError`.
+- Installable separately from the plugins: an `mcp-server/` package as a third `scripts/sync-core.sh` target.
+
+**Open decision — distribution channel:**
+
+| Channel | Launch | Host needs | Release cost |
+|---|---|---|---|
+| npm `@lehcode/multilint-mcp` | `npx -y @lehcode/multilint-mcp` | Node, python3, Docker | Low: one more job in the existing npm publish |
+| PyPI `multilint-mcp` | `uvx multilint-mcp` | uv, Docker | Medium: `pyproject.toml`, PyPI publish workflow, release-please entry |
+
+Rejected: the image as the MCP server. It needs a per-project absolute mount in each client config, `lint.sh` back in the image, and `docker.sock` to start its own containers.
+
+**Impact:** Multilint for every MCP client; MCP registry listing (`doc/promotion.md`).
+
+**Risk:** Low to medium. A second user-facing surface that duplicates the plugins' hook and subagent; the path bound is the security boundary and needs its own tests.
+
+---
+
 ## Summary Table
 
 | Priority | Item | Status | Effort | Impact |
@@ -112,6 +140,7 @@ MultiLint is a Docker-hosted linting service that validates shell, Python, Markd
 | P2 | Expanded file types | ✅ Complete | Medium | Medium |
 | P2 | Security scanning | ✅ Complete | Medium-High | High |
 | P3 | Auto-fix | ⏳ Pending | Medium-High | Medium |
+| P3 | Standalone stdio MCP server | ⏳ Postponed | Medium | Medium |
 | P4 | Telemetry | ⏳ Pending | Low | Low |
 
 ---
