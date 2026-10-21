@@ -5,8 +5,8 @@
   "permissions": [
     {
       "action": "external_directory",
-      "resource": "/home/takeshi/.opencode/*",
-      "effect": "deny"
+      "resource": "{env:HOME}/.opencode/*",
+      "effect": "allow"
     }
   ]
 }
