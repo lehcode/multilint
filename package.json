@@ -5,6 +5,7 @@
   "keywords": [
     "lint",
     "agent",
+    "claude code",
     "opencode"
   ],
   "homepage": "https://github.com/lehcode/multilint",
@@ -36,7 +37,6 @@
     "build:js": "esbuild src/index.ts --bundle --platform=node --minify --format=esm --external:@opencode/plugin --outfile=dist/index.js",
     "build:types": "tsc -p tsconfig.json",
     "build": "npm run build:js && npm run build:types",
-    "test": "bun test tests",
     "build:watch": "esbuild src/index.ts --bundle --platform=node --format=esm --external:@opencode/plugin --outfile=dist/index.js --watch",
     "prepublishOnly": "npm run build"
   },
