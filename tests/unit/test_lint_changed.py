@@ -982,7 +982,10 @@ class TestEveryLintableTypeReachesLint:
         assert output["hookSpecificOutput"]["additionalContext"] == (
             "multilint could not lint sample.py: docker not found on PATH. Treat the file as unverified."
         )
-        assert output["systemMessage"] == "multilint: could not lint"
+        assert output["systemMessage"] == (
+            "multilint: could not lint\n\n"
+            "multilint could not lint sample.py: docker not found on PATH. Treat the file as unverified."
+        )
 
     def test_identical_save_after_unavailable_lint_is_linted_again(self, hook, tmp_path, monkeypatch):
         """The digest is recorded before linting; a failed run must not make the next save "unchanged"."""
