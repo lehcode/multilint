@@ -31,7 +31,7 @@
     "dist/",
     "scripts/",
     "hooks/",
-    ".claude-plugin/"
+    ".claude-plugin/plugin.json"
   ],
   "scripts": {
     "build:js": "esbuild src/index.ts --bundle --platform=node --minify --format=esm --external:@opencode/plugin --outfile=dist/index.js",
