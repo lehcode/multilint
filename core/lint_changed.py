@@ -896,14 +896,19 @@ def main() -> int:
 
 
 def emit(notices: list[str], summary: str) -> None:
-    """Write the PostToolUse hook output: notices for Claude, a one-line summary for the user."""
+    """Write the PostToolUse hook output: findings for the user, summary for additionalContext."""
+    # systemMessage is what the user sees: include the actual findings, not just counts.
+    # additionalContext still carries all notices for the model.
+    msg = "multilint: " + summary
+    if notices:
+        msg = msg + "\n\n" + notices[0]
     json.dump(
         {
             "hookSpecificOutput": {
                 "hookEventName": "PostToolUse",
                 "additionalContext": "\n\n".join(notices),
             },
-            "systemMessage": "multilint: " + summary,
+            "systemMessage": msg[:MAX_CONTEXT_CHARS],
         },
         sys.stdout,
     )
