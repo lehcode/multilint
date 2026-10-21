@@ -141,7 +141,32 @@ Rejected: the image as the MCP server. It needs a per-project absolute mount in 
 | P2 | Security scanning | ✅ Complete | Medium-High | High |
 | P3 | Auto-fix | ⏳ Pending | Medium-High | Medium |
 | P3 | Standalone stdio MCP server | ⏳ Postponed | Medium | Medium |
+| P3 | Vale prose lint | ⏳ Postponed | Low | Medium |
 | P4 | Telemetry | ⏳ Pending | Low | Low |
+
+---
+
+## ⏳ Phase 5.5: Prose Quality (Postponed)
+
+### 10. Vale Prose Lint [P3]
+
+**Problem:** markdownlint only checks structural/formatting issues (spacing, headings, links). No tool enforces style, tone, or readability rules in prose.
+
+**Design:**
+
+- Add `vale` to the Docker image (Go binary, no runtime deps)
+- New check `vale_prose` added to `ALL_CHECKS` and `check_failures`
+- Run `vale <file>` for each Markdown file; parse `vale` output for findings
+- Configurable via `.multilint.json`:
+  - `vale_prose` threshold (flat key)
+  - `checks.vale_prose.enabled`, `checks.vale_prose.threshold`
+  - `checks.vale_prose.args` (e.g. `["--minalertlevel=suggestion"]`)
+- Style rules stored in `styles/` directory alongside the project
+- Output format: `file:line:col level message (rule)` — already grep-friendly
+
+**Impact:** Consistent prose quality across all documentation; style guide enforcement as a build step.
+
+**Risk:** Low. `vale` is a single binary already installed on the host (v3.24.0). Dockerfile `COPY` needed; style rules are project-specific and version-controlled.
 
 ---
 
