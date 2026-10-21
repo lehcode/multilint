@@ -6,10 +6,11 @@
       "package-name": "@lehcode/multilint",
       "extra-files": [
         { "type": "generic", "path": "core/lint_changed.py" },
-        { "type": "generic", "path": "claude-plugin/scripts/lint_changed.py" },
-        { "type": "generic", "path": "opencode-plugin/scripts/lint_changed.py" },
-        { "type": "json", "path": "opencode-plugin/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "opencode-plugin/package-lock.json", "jsonpath": "$.version" }
+        { "type": "generic", "path": "scripts/lint_changed.py" },
+        { "type": "json", "path": "package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "package-lock.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "package-lock.json", "jsonpath": "$.packages[\"\"].version" },
+        { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" }
       ],
       "changelog-path": "CHANGELOG.md",
       "include-v-in-tag": true,
