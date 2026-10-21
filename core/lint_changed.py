@@ -405,6 +405,7 @@ def open_state() -> sqlite3.Connection | None:
             ("first_seen_at", "first_seen_at TEXT"),
             ("last_seen_at", "last_seen_at TEXT"),
             ("last_linted_at", "last_linted_at TEXT"),
+            ("last_notice", "last_notice TEXT"),
         ):
             if column not in existing:
                 connection.execute(f"ALTER TABLE seen ADD COLUMN {ddl}")
@@ -486,12 +487,16 @@ def record_and_check(
     connection: sqlite3.Connection | None,
     path: Path,
     git_root: Path | None,
+    notice: str | None = None,
 ) -> bool:
     """Record what this file looks like now; return True when its content differs from last time.
 
     Applies to repository files as well as loose ones. Under git the file is dirty by definition once
     it has been written, so the digest is the only thing that distinguishes "saved with changes" from
     "saved identical content", and re-linting the latter tells the user nothing.
+
+    When the content has changed (or is new), `notice` is the rendered notice to store so it can
+    be re-emitted on unchanged re-writes that still fail or skip.
 
     Without a database every write counts as a change: linting twice is wasteful, but skipping a real
     change is a false clean, and only one of those two errors is acceptable.
@@ -511,14 +516,15 @@ def record_and_check(
         changed = row is None or row[0] != digest
         connection.execute(
             "INSERT INTO seen (path, size, mtime_ns, digest, in_git, git_root, "
-            "first_seen_at, last_seen_at, last_linted_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "first_seen_at, last_seen_at, last_linted_at, last_notice) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, "
             "digest=excluded.digest, in_git=excluded.in_git, git_root=excluded.git_root, "
             "first_seen_at=COALESCE(seen.first_seen_at, excluded.first_seen_at), "
             "last_seen_at=excluded.last_seen_at, "
             "last_linted_at=CASE WHEN excluded.last_linted_at IS NULL THEN seen.last_linted_at "
-            "ELSE excluded.last_linted_at END",
+            "ELSE excluded.last_linted_at END, "
+            "last_notice=excluded.last_notice",
             (
                 key,
                 stat.st_size,
@@ -529,6 +535,7 @@ def record_and_check(
                 stamp,
                 stamp,
                 stamp if changed else None,
+                notice if changed else None,
             ),
         )
         connection.commit()
@@ -766,6 +773,20 @@ def changed_scope_root(edited: Path) -> Path | None:
     return scope_root
 
 
+def stored_notice(path: Path) -> str | None:
+    """Retrieve the last rendered notice for `path` from the state DB, or None when clean/absent."""
+    state = open_state()
+    if state is None:
+        return None
+    try:
+        row = state.execute("SELECT last_notice FROM seen WHERE path = ?", (str(path),)).fetchone()
+        return row[0] if row and row[0] else None
+    except sqlite3.Error:
+        return None
+    finally:
+        state.close()
+
+
 def summarize_results(results: list) -> tuple[list[str], set[str], list[str], int]:
     """Fold per-file lint results into (findings, skipped checks, config warnings, failed count).
 
@@ -862,6 +883,10 @@ def main() -> int:
 
     scope_root = changed_scope_root(edited)
     if scope_root is None:
+        # Same bytes as last time. If the file still fails or skips, re-emit the stored notice.
+        notice = stored_notice(edited)
+        if notice:
+            emit([notice], "unchanged")
         return 0
 
     # Relative to the scope root because that is the working directory for lint.sh.
