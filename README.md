@@ -340,14 +340,14 @@ MultiLint integrates with OpenCode through three mechanisms, configured in `open
 ### 1. Plugin — Automatic linting on file save
 
 ```json
-"plugin": ["./.opencode/plugins/multilint.js"]
+"plugin": ["./.opencode/plugins/multilint"]
 ```
 
 The plugin runs linting automatically after every file save — no agent involvement needed.
 
 **How it works:**
 
-1. OpenCode loads `multilint.js` as a V2 plugin (`export default { id, setup }`)
+1. OpenCode loads `./.opencode/plugins/multilint/index.js` as a V2 plugin (`export default { id, setup }`)
 2. The plugin hooks into `ctx.tool.hook("execute.after", ...)` — fires after every tool execution
 3. Extracts the file path from tool input, checks extension against whitelist
 4. Calls `POST http://localhost:8591/lint` with the file's parent directory
