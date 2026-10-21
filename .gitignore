@@ -11,3 +11,4 @@ node_modules/
 .atl
 .env
 odd
+*.tgz
