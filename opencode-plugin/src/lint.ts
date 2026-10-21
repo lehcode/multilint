@@ -66,11 +66,22 @@ function runHook(payload: object, cwd: string): Promise<string> {
 }
 
 /**
- * Lints one file. Returns the "<multilint>...</multilint>" notice, or null when there is nothing to
- * report (unsupported file, clean result, or a relative path outside `directory`). A run that fails
- * returns a "could not lint" notice, never null: silence would read like a clean file.
+ * One lint run's output: the "<multilint>...</multilint>" notice for the tool result, the raw
+ * report text behind it (src/notice.ts classifies it into the short TUI notice), and the
+ * absolute path of the file the run linted.
  */
-export async function lintNotice(filePath: string, directory: string | undefined): Promise<string | null> {
+export interface LintOutcome {
+  readonly notice: string;
+  readonly report: string;
+  readonly file: string;
+}
+
+/**
+ * Lints one file. Returns null when there is nothing to report (unsupported file, no changes,
+ * or a relative path outside `directory`). A run that fails returns a "could not lint" outcome,
+ * never null: silence would read like a clean file.
+ */
+export async function lintNotice(filePath: string, directory: string | undefined): Promise<LintOutcome | null> {
   if (typeof filePath !== "string" || filePath === "") return null;
   let absolute: string;
   if (path.isAbsolute(filePath)) {
@@ -91,13 +102,15 @@ export async function lintNotice(filePath: string, directory: string | undefined
     stdout = await runHook(payload, cwd);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    return wrap(`multilint could not lint ${absolute}: ${reason}. Treat the file as unverified.`);
+    const report = `multilint could not lint ${absolute}: ${reason}. Treat the file as unverified.`;
+    return { notice: wrap(report), report, file: absolute };
   }
   if (stdout.trim() === "") return null;
   try {
     const context = JSON.parse(stdout)?.hookSpecificOutput?.additionalContext;
-    return typeof context === "string" && context !== "" ? wrap(context) : null;
+    return typeof context === "string" && context !== "" ? { notice: wrap(context), report: context, file: absolute } : null;
   } catch {
-    return wrap(`multilint could not lint ${absolute}: unreadable output from multilint.sh. Treat the file as unverified.`);
+    const report = `multilint could not lint ${absolute}: unreadable output from multilint.sh. Treat the file as unverified.`;
+    return { notice: wrap(report), report, file: absolute };
   }
 }

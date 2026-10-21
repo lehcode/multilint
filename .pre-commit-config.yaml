@@ -36,7 +36,7 @@ repos:
 
   # Shell script linting (Zero tolerance: fails on error, warning, info, style)
   - repo: https://github.com/koalaman/shellcheck-precommit
-    rev: v0.9.0
+    rev: master
     hooks:
       - id: shellcheck
         args: ['-e', 'SC1091,SC2155,SC2086', '-S', 'style']

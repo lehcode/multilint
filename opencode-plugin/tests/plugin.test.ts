@@ -7,8 +7,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import plugin from "../src/plugin.ts";
-import * as pluginModule from "../src/plugin.ts";
+import plugin from "../src/index.ts";
+import * as pluginModule from "../src/index.ts";
 import { MULTILINT_SH } from "../src/lint.ts";
 
 const DEFECTIVE_SH = "#!/bin/bash\necho $1\nif [ $x = 1 ]; then echo; fi\n";
@@ -49,8 +49,11 @@ afterAll(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
+type SyntheticInput = { sessionID: string; text: string; description: string; resume: boolean };
+
 async function runV2(input: unknown, result: unknown, directory = project) {
   let hook: ((event: any) => Promise<void>) | undefined;
+  const notices: SyntheticInput[] = [];
   const ctx: any = {
     location: { directory },
     tool: {
@@ -60,33 +63,40 @@ async function runV2(input: unknown, result: unknown, directory = project) {
         return { dispose: async () => {} };
       },
     },
+    // Records the short TUI notice; the real ctx.session.synthetic sends it into the session
+    // (resume: false = no model turn).
+    session: {
+      synthetic: async (synthetic: SyntheticInput) => {
+        notices.push(synthetic);
+      },
+    },
   };
   await plugin.setup(ctx);
-  const event: any = { tool: "write", status: "completed", input, result };
+  const event: any = { tool: "write", status: "completed", sessionID: "test-session", input, result };
   await hook!(event);
-  return event;
+  return { event, notices };
 }
 
 withImage("V2: a defective file's findings are pushed onto the tool result", async () => {
-  const event = await runV2({ path: "broken.sh" }, { content: [{ type: "text", text: "Created broken.sh" }] });
+  const { event } = await runV2({ path: "broken.sh" }, { content: [{ type: "text", text: "Created broken.sh" }] });
   expect(event.result.content).toHaveLength(2);
   expect(event.result.content[1].text).toStartWith("<multilint>");
   expect(event.result.content[1].text).toContain("shellcheck");
 
-  const nested = await runV2({ filePath: path.join(project, "sub", "a.sh") }, { content: [{ type: "text", text: "ok" }] });
+  const { event: nested } = await runV2({ filePath: path.join(project, "sub", "a.sh") }, { content: [{ type: "text", text: "ok" }] });
   expect(nested.result.content[1].text).toContain("shellcheck");
 });
 
 withImage("V2: a relative path outside the project is not linted", async () => {
-  const event = await runV2({ path: "../outside.sh" }, { content: [{ type: "text", text: "ok" }] });
+  const { event } = await runV2({ path: "../outside.sh" }, { content: [{ type: "text", text: "ok" }] });
   expect(event.result.content).toHaveLength(1);
   // The same file named by its absolute path is linted, which proves the guard above did the work.
-  const absolute = await runV2({ path: path.join(root, "outside.sh") }, { content: [{ type: "text", text: "ok" }] });
+  const { event: absolute } = await runV2({ path: path.join(root, "outside.sh") }, { content: [{ type: "text", text: "ok" }] });
   expect(absolute.result.content[1].text).toContain("shellcheck");
 });
 
 withImage("V2: a file whose name starts with '..' is inside the project", async () => {
-  const event = await runV2({ path: "..dotted.sh" }, { content: [{ type: "text", text: "ok" }] });
+  const { event } = await runV2({ path: "..dotted.sh" }, { content: [{ type: "text", text: "ok" }] });
   expect(event.result.content[1].text).toContain("shellcheck");
 });
 
@@ -109,7 +119,7 @@ test("a crashed run is reported, never silent", async () => {
   writeFileSync(path.join(bin, "python3"), "#!/bin/sh\nexit 3\n", { mode: 0o755 });
   process.env.PATH = `${bin}:${saved.PATH}`;
   try {
-    const event = await runV2({ path: "crash.sh" }, { content: [{ type: "text", text: "ok" }] });
+    const { event } = await runV2({ path: "crash.sh" }, { content: [{ type: "text", text: "ok" }] });
     expect(event.result.content[1].text).toContain("multilint.sh exited with status 3");
   } finally {
     process.env.PATH = saved.PATH;
@@ -120,10 +130,42 @@ test("a run that cannot start is reported, never silent", async () => {
   writeFileSync(path.join(project, "nobash.sh"), DEFECTIVE_SH);
   process.env.PATH = path.join(root, "empty-bin");
   try {
-    const event = await runV2({ path: "nobash.sh" }, { content: [{ type: "text", text: "ok" }] });
+    const { event } = await runV2({ path: "nobash.sh" }, { content: [{ type: "text", text: "ok" }] });
     expect(event.result.content[1].text).toContain("multilint could not lint");
     expect(event.result.content[1].text).toContain("unverified");
   } finally {
     process.env.PATH = saved.PATH;
   }
+});
+
+withImage("V2: the TUI notice — silent on clean, one line per failed edit, then the recovery line", async () => {
+  const cleanSh = "#!/bin/bash\nset -eu\nif [ \"$1\" = ok ]; then\n    echo ok\nfi\n";
+  writeFileSync(path.join(project, "notice.sh"), cleanSh);
+
+  // A clean file that never failed: the report is delivered, the TUI stays quiet.
+  const { event: clean, notices: quiet } = await runV2({ path: "notice.sh" }, { content: [{ type: "text", text: "ok" }] });
+  expect(clean.result.content).toHaveLength(2);
+  expect(quiet).toEqual([]);
+
+  // A defect: the report is delivered and exactly one failure line is emitted.
+  writeFileSync(path.join(project, "notice.sh"), DEFECTIVE_SH);
+  const { event: failed, notices } = await runV2({ path: "notice.sh" }, { content: [{ type: "text", text: "ok" }] });
+  expect(failed.result.content[1].text).toContain("failed");
+  expect(notices).toHaveLength(1);
+  expect(notices[0].sessionID).toBe("test-session");
+  expect(notices[0].description).toBe(notices[0].text);
+  expect(notices[0].resume).toBe(false);
+  const was = notices[0].text.slice("multilint: notice.sh failed ".length);
+
+  // The fix: exactly one recovery line naming the checks that failed.
+  writeFileSync(path.join(project, "notice.sh"), cleanSh);
+  const { notices: recovered } = await runV2({ path: "notice.sh" }, { content: [{ type: "text", text: "ok" }] });
+  expect(recovered).toEqual([
+    {
+      sessionID: "test-session",
+      text: `multilint: notice.sh clean (was: ${was})`,
+      description: `multilint: notice.sh clean (was: ${was})`,
+      resume: false,
+    },
+  ]);
 });
