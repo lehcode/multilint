@@ -1,6 +1,6 @@
 {
   "name": "@lehcode/multilint",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "OpenCode plugin that lints each edited file on the host with multilint. Missing linters are reported as skipped.",
   "keywords": [
     "lint",
@@ -20,23 +20,23 @@
   "type": "module",
   "exports": {
     ".": {
-      "types": "./dist/plugin.d.ts",
-      "import": "./dist/plugin.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
   },
-  "main": "./dist/plugin.js",
-  "types": "./dist/plugin.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "files": [
     "dist/",
     "scripts/",
     "agents/"
   ],
   "scripts": {
-    "build:js": "esbuild src/plugin.ts --bundle --platform=node --minify --format=esm --external:@opencode/plugin --outfile=dist/plugin.js",
+    "build:js": "esbuild src/index.ts --bundle --platform=node --minify --format=esm --external:@opencode/plugin --outfile=dist/index.js",
     "build:types": "tsc -p tsconfig.json",
     "build": "npm run build:js && npm run build:types",
     "test": "bun test tests",
-    "build:watch": "esbuild src/plugin.ts --bundle --platform=node --format=esm --external:@opencode/plugin --outfile=dist/plugin.js --watch",
+    "build:watch": "esbuild src/index.ts --bundle --platform=node --format=esm --external:@opencode/plugin --outfile=dist/index.js --watch",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {},
