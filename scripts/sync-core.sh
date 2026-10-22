@@ -29,6 +29,22 @@ TARGETS=(
     "${REPO_ROOT}/opencode-plugin/scripts"
 )
 
+# Targets that receive and are checked for the core/ files but are never pruned, because they
+# also hold files of their own. Interim: scripts/ still ships the engine through the root
+# package (package.json "files", hooks/hooks.json, src/lint.ts) until the plugins are
+# self-contained, and it also holds this script and the other dev tools.
+COPY_ONLY_TARGETS=(
+    "${REPO_ROOT}/scripts"
+)
+
+is_copy_only() {
+    local copy_only
+    for copy_only in "${COPY_ONLY_TARGETS[@]}"; do
+        [ "${copy_only}" = "$1" ] && return 0
+    done
+    return 1
+}
+
 # Collect every regular file directly under core/ (no subdirectories).
 CORE_FILES=()
 while IFS= read -r -d '' file; do
@@ -46,7 +62,7 @@ done
 if [ "${check_mode}" -eq 1 ]; then
     drift_found=0
 
-    for target in "${TARGETS[@]}"; do
+    for target in "${TARGETS[@]}" "${COPY_ONLY_TARGETS[@]}"; do
         # A missing target is drift, not a pass: the plugin would ship without its engine.
         if [ ! -d "${target}" ]; then
             echo "drift: ${target} (missing)" >&2
@@ -76,6 +92,8 @@ if [ "${check_mode}" -eq 1 ]; then
             fi
         done
 
+        is_copy_only "${target}" && continue
+
         # Detect extra files in the target that are not in core/
         while IFS= read -r -d '' target_file; do
             file="$(basename "${target_file}")"
@@ -101,7 +119,7 @@ if [ "${check_mode}" -eq 1 ]; then
 fi
 
 # --- default mode: copy core → targets ---
-for target in "${TARGETS[@]}"; do
+for target in "${TARGETS[@]}" "${COPY_ONLY_TARGETS[@]}"; do
     [ -d "${target}" ] || mkdir -p "${target}"
 
     # Copy each core file, preserving attributes (exec bits)
@@ -110,6 +128,8 @@ for target in "${TARGETS[@]}"; do
         target_file="${target}/${file}"
         cp -p "${core_file}" "${target_file}"
     done
+
+    is_copy_only "${target}" && continue
 
     # Remove files in target that no longer exist in core/
     while IFS= read -r -d '' target_file; do
