@@ -3,12 +3,12 @@
 
 Usage: multilint_config.py [--root DIR] VERB [OPERAND...]   (see --help)
 
-Stdlib-only. The validation constants below are verbatim copies of the ML_CONFIG_PY
-heredoc in lint.sh, which stays authoritative at lint time; tests/unit/test_multilint_config.py
-fails when the two diverge. This tool only prevents writing input that lint.sh would warn about or
-ignore. The `image` and `search_ceiling` settings are not configuration keys: they are delegated to
-lint_changed.py (--set/--get/--unset), the only writer of the settings database. Environment
-variables are never read or set as a configuration channel.
+Stdlib-only. The validation constants (ALL_CHECKS, NO_ARGS_CHECKS, CHECK_SETTING_KEYS, OPTION_GROUPS)
+come from ml_config_schema.py, shared with lint.sh, which stays authoritative at lint time.
+This tool only prevents writing input that lint.sh would warn about or ignore. The `image` and
+`search_ceiling` settings are not configuration keys: they are delegated to lint_changed.py
+(--set/--get/--unset), the only writer of the settings database. Environment variables are never
+read or set as a configuration channel.
 
 Exit status: 0 on success (a no-op edit and `show` included), 1 on every rejection, refusal and
 usage error; a settings verb returns lint_changed.py's status unchanged.
@@ -27,31 +27,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-ALL_CHECKS = (
-    "bash_syntax",
-    "shellcheck",
-    "bashate",
-    "shfmt",
-    "flake8",
-    "black",
-    "pylint",
-    "mypy",
-    "bandit",
-    "markdownlint",
-    "yaml_prettier",
-    "json_prettier",
-    "toml_sort",
-    "security_secrets",
-    "security_dangerous_patterns",
-    "gitleaks",
-)
-NO_ARGS_CHECKS = {"bash_syntax", "security_secrets", "security_dangerous_patterns"}
-CHECK_SETTING_KEYS = {"enabled", "threshold", "args"}
-OPTION_GROUPS = {
-    "gitleaks": {"depth", "config"},
-    "bandit": {"severity"},
-    "mypy": {"cache_dir"},
-}
+from ml_config_schema import ALL_CHECKS, CHECK_SETTING_KEYS, NO_ARGS_CHECKS, OPTION_GROUPS
+
 OPTION_CHOICES = {
     ("gitleaks", "depth"): ("all", "1"),
     ("bandit", "severity"): ("-l", "-ll", "-lll"),
