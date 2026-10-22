@@ -41,10 +41,11 @@ class TestSyncDriftDetection:
 
     @pytest.fixture
     def tmp_repo(self, tmp_path):
-        """A temporary git repo with core/, scripts/sync-core.sh, and both in-sync target dirs.
+        """A temporary git repo with core/, scripts/sync-core.sh, and every in-sync target dir.
 
         The sync script resolves repo root via git rev-parse --show-toplevel; its targets are
-        claude-plugin/scripts and opencode-plugin/scripts relative to that root.
+        claude-plugin/scripts and opencode-plugin/scripts, plus the copy-only scripts/, relative
+        to that root.
         """
         core_dir = tmp_path / "core"
         core_dir.mkdir()
@@ -55,6 +56,8 @@ class TestSyncDriftDetection:
         targets = [tmp_path / plugin / "scripts" for plugin in TARGET_PLUGINS]
         for target_dir in targets:
             target_dir.mkdir(parents=True)
+        # scripts/ is a copy-only target: it receives the core files beside its own.
+        targets.append(scripts_dir)
 
         # Copy core files into tmp repo
         for f in ("lint.sh", "lint_changed.py", "multilint.sh", "multilint_config.py"):
@@ -157,3 +160,41 @@ class TestSyncDriftDetection:
         )
         assert result.returncode == 1
         assert "missing" in result.stderr
+
+    def test_modified_copy_only_target_detected(self, tmp_repo):
+        """scripts/ is checked for drift like a plugin target."""
+        (tmp_repo / "scripts" / "lint.sh").write_text("MODIFIED\n", encoding="utf-8")
+
+        result = subprocess.run(
+            ["bash", str(tmp_repo / "scripts" / "sync-core.sh"), "--check"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_repo,
+        )
+        assert result.returncode == 1
+        assert "scripts/lint.sh" in result.stderr
+
+    def test_copy_only_target_keeps_own_files(self, tmp_repo):
+        """scripts/ holds sync-core.sh and other tools: sync never prunes it and --check never calls them extra."""
+        own_file = tmp_repo / "scripts" / "dev-tool.sh"
+        own_file.write_text("# dev tool\n", encoding="utf-8")
+        (tmp_repo / "scripts" / "lint.sh").write_text("MODIFIED\n", encoding="utf-8")
+
+        subprocess.run(
+            ["bash", str(tmp_repo / "scripts" / "sync-core.sh")],
+            capture_output=True,
+            text=True,
+            cwd=tmp_repo,
+            check=True,
+        )
+
+        result = subprocess.run(
+            ["bash", str(tmp_repo / "scripts" / "sync-core.sh"), "--check"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_repo,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert own_file.exists()
+        assert (tmp_repo / "scripts" / "sync-core.sh").exists()
+        assert (tmp_repo / "scripts" / "lint.sh").read_text(encoding="utf-8") == "content-lint.sh\n"
