@@ -5,8 +5,10 @@
       "release-type": "simple",
       "package-name": "@lehcode/multilint",
       "extra-files": [
-        { "type": "generic", "path": "core/lint_changed.py" },
-        { "type": "generic", "path": "scripts/lint_changed.py" },
+        { "type": "generic", "path": "core/ml_settings.py" },
+        { "type": "generic", "path": "scripts/ml_settings.py" },
+        { "type": "generic", "path": "claude-plugin/scripts/ml_settings.py" },
+        { "type": "generic", "path": "opencode-plugin/scripts/ml_settings.py" },
         { "type": "json", "path": "package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "package-lock.json", "jsonpath": "$.version" },
         { "type": "json", "path": "package-lock.json", "jsonpath": "$.packages[\"\"].version" },

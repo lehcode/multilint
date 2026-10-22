@@ -19,12 +19,12 @@ HOOK_SCRIPT = str(SCRIPTS / "multilint.sh")
 
 
 def _default_image():
-    """The image tag pinned in the plugin's lint_changed.py."""
+    """The image tag pinned in the plugin's ml_settings.py."""
     out = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import sys; sys.path.insert(0, sys.argv[1]); import lint_changed as m; " "print(m.DEFAULT_IMAGE)",
+            "import sys; sys.path.insert(0, sys.argv[1]); import ml_settings as m; print(m.DEFAULT_IMAGE)",
             str(SCRIPTS),
         ],
         capture_output=True,
