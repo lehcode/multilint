@@ -16,7 +16,7 @@
 set -uo pipefail
 
 if ! command -v python3 >/dev/null 2>&1; then
-    printf '%s\n' '{"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "multilint could not lint the edited file: python3 not found on PATH. Treat the file as unverified."}, "systemMessage": "multilint: could not lint"}'
+    printf '%s\n' '{"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "multilint could not lint the edited file: python3 not found on PATH. Treat the file as unverified."}, "systemMessage": "multilint: could not lint: python3 not found on PATH"}'
     exit 0
 fi
 

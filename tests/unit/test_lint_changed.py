@@ -89,7 +89,7 @@ class TestImageResolution:
         with pytest.raises(ValueError, match="cannot start with '-'"):
             hook.write_setting("image", value)
 
-    def test_default_image_has_version_marker(self, hook):
+    def test_default_image_has_version_marker(self):
         source = HOOK_PATH.read_text(encoding="utf-8")
         assert "x-release-please-version" in source
 
@@ -862,6 +862,25 @@ class TestFindingsNotice:
             "Rules: F401"
         )
 
+    def test_skipped_checks_carry_their_reason(self, hook):
+        document = {
+            "return_code": 0,
+            "summary": {"checks_skipped": ["gitleaks", "hadolint"]},
+            "checks": {
+                "gitleaks": {"status": "skipped", "reason": "not installed on PATH"},
+                "hadolint": {"status": "skipped"},
+            },
+        }
+        results = [("a.py", document, "")]
+        findings, skipped, warnings, failed = hook.summarize_results(results)
+        reasons = hook.skip_reasons(results)
+        (notice,) = hook.build_notices("a.py", findings, skipped, warnings, failed, reasons=reasons)
+        assert notice == (
+            "multilint could not run these checks, so a.py is unverified for them:\n"
+            "  gitleaks: not installed on PATH\n"
+            "  hadolint"
+        )
+
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 
@@ -1014,7 +1033,80 @@ class TestEveryLintableTypeReachesLint:
         assert proc.returncode == 0
         output = json.loads(proc.stdout)
         assert "python3 not found on PATH" in output["hookSpecificOutput"]["additionalContext"]
-        assert output["systemMessage"] == "multilint: could not lint"
+        assert output["systemMessage"] == "multilint: could not lint: python3 not found on PATH"
+
+
+class TestRepeatedVerdict:
+    """An identical save repeats a failing verdict instead of going silent; a clean one stays silent."""
+
+    FAILING = {
+        "return_code": 1,
+        "checks": {
+            "flake8": {
+                "status": "failed",
+                "findings": [{"rule": "F401", "file": "sample.py", "line": 1, "message": "'os' imported but unused"}],
+            }
+        },
+        "summary": {"rules_violated": ["F401"]},
+    }
+    CLEAN = {"return_code": 0, "checks": {"flake8": {"status": "passed"}}, "summary": {}}
+
+    @pytest.fixture
+    def payload(self, tmp_path):
+        repo = _git_repo(tmp_path)
+        (repo / "sample.py").write_text("import os\n", encoding="utf-8")
+        return {"tool_name": "Write", "cwd": str(repo), "tool_input": {"file_path": str(repo / "sample.py")}}
+
+    def test_identical_save_of_a_failing_file_repeats_the_findings(self, hook, tmp_path, monkeypatch, payload):
+        _code, _calls, first = _drive_hook(hook, monkeypatch, tmp_path, payload, [("sample.py", self.FAILING, "")])
+        _code, calls, second = _drive_hook(hook, monkeypatch, tmp_path, payload)
+
+        assert calls == [], "identical content must not be re-linted"
+        first, second = json.loads(first), json.loads(second)
+        assert second["hookSpecificOutput"] == first["hookSpecificOutput"]
+        assert second["systemMessage"].startswith(
+            "multilint: 1 file(s) with failing checks (unchanged since last lint)"
+        )
+        assert "F401" in second["systemMessage"]
+
+    def test_identical_save_of_a_clean_file_stays_silent(self, hook, tmp_path, monkeypatch, payload):
+        _drive_hook(hook, monkeypatch, tmp_path, payload, [("sample.py", self.CLEAN, "")])
+        _code, calls, out = _drive_hook(hook, monkeypatch, tmp_path, payload)
+
+        assert (calls, out) == ([], "")
+
+    def test_a_clean_lint_clears_the_stored_verdict(self, hook, tmp_path, monkeypatch, payload):
+        target = Path(payload["tool_input"]["file_path"])
+        _drive_hook(hook, monkeypatch, tmp_path, payload, [("sample.py", self.FAILING, "")])
+        target.write_text("x = 1\n", encoding="utf-8")
+        _drive_hook(hook, monkeypatch, tmp_path, payload, [("sample.py", self.CLEAN, "")])
+        _code, calls, out = _drive_hook(hook, monkeypatch, tmp_path, payload)
+
+        assert (calls, out) == ([], "")
+
+    def test_changed_content_drops_the_old_verdict(self, hook, tmp_path, monkeypatch, payload):
+        """The stored report described bytes that are gone; it must not survive a content change."""
+        target = Path(payload["tool_input"]["file_path"])
+        _drive_hook(hook, monkeypatch, tmp_path, payload, [("sample.py", self.FAILING, "")])
+        target.write_text("x = 1\n", encoding="utf-8")
+        monkeypatch.setattr(hook, "state_dir", lambda: tmp_path / "state")
+        state = hook.open_state()
+        try:
+            assert hook.record_and_check(state, target.resolve(), None) is True
+        finally:
+            state.close()
+
+        assert hook.stored_report(target.resolve()) is None
+
+    def test_user_message_carries_every_notice(self, hook, tmp_path, monkeypatch, payload):
+        document = dict(self.FAILING, summary={"rules_violated": ["F401"], "checks_skipped": ["gitleaks"]})
+        document["checks"] = dict(self.FAILING["checks"], gitleaks={"status": "skipped", "reason": "not installed"})
+
+        _code, _calls, out = _drive_hook(hook, monkeypatch, tmp_path, payload, [("sample.py", document, "")])
+
+        message = json.loads(out)["systemMessage"]
+        assert "F401" in message
+        assert "gitleaks: not installed" in message
 
 
 class TestLintableTypesMatchLintSh:
@@ -1036,10 +1128,10 @@ class TestHookWiring:
     """hooks.json -> multilint.sh -> lint_changed.py: a break anywhere means no edit is linted."""
 
     def test_post_tool_use_matches_write_and_edit(self):
-        hooks = json.loads((REPO_ROOT / "claude-plugin" / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        hooks = json.loads((REPO_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         entry = hooks["hooks"]["PostToolUse"][0]
         assert {"Write", "Edit"} <= set(entry["matcher"].split("|"))
-        assert entry["hooks"][0]["command"].endswith('/scripts/multilint.sh"')
+        assert entry["hooks"][0]["command"].endswith("scripts/multilint.sh")
 
     def test_entrypoint_execs_hook_body(self):
         script = (REPO_ROOT / "core" / "multilint.sh").read_text(encoding="utf-8")

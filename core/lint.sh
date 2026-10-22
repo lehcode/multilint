@@ -143,9 +143,13 @@ declare -A check_totals
 # tool is absent or the check is switched off. "failed" is derived in the
 # emitter from the failure counter, so it is never stored here.
 declare -A check_status
+# Why a skipped check did not run ("not installed on PATH", "disabled by ..."),
+# so the plugin can tell the user what to fix instead of a bare check name.
+declare -A check_reason
 for _ml_check in "${ALL_CHECKS[@]}"; do
     check_totals[$_ml_check]=0
     check_status[$_ml_check]="ok"
+    check_reason[$_ml_check]=""
 done
 unset _ml_check
 
@@ -539,7 +543,13 @@ warn()  { echo "  ~ $*"; }
 ran()  { check_totals[$1]=$(( check_totals[$1] + 1 )); }
 # Record that $1 did not run at all. Idempotent: the guards live inside the
 # per-file loops, so this fires once per file when a tool is missing.
-skipped() { check_status[$1]="skipped"; }
+# $2 is the human-readable reason; the first one recorded wins.
+skipped() {
+    check_status[$1]="skipped"
+    if [ -n "${2:-}" ] && [ -z "${check_reason[$1]}" ]; then
+        check_reason[$1]="$2"
+    fi
+}
 
 # Raw tool output per failing unit, kept for the JSON emitter, which parses it
 # into "findings". One <seq>.<check>.file/.out pair per call so the emitter can
@@ -640,7 +650,7 @@ else
         # (checks.bash_syntax.enabled) can skip it. args is unsupported here
         # (bash -n takes no policy flags).
         if ! check_enabled bash_syntax; then
-            skipped bash_syntax
+            skipped bash_syntax "disabled by checks.bash_syntax.enabled"
             warn "bash_syntax (disabled)"
         else
             ran bash_syntax
@@ -660,7 +670,7 @@ else
         # -f gcc is a harness flag, always kept after the policy flags: one
         # file:line:col line per finding, which the JSON emitter can parse.
         if ! check_enabled shellcheck; then
-            skipped shellcheck
+            skipped shellcheck "disabled by checks.shellcheck.enabled"
             warn "shellcheck (disabled)"
         elif command -v shellcheck >/dev/null 2>&1; then
             ran shellcheck
@@ -677,14 +687,14 @@ else
                 fail "shellcheck"
             fi
         else
-            skipped shellcheck
+            skipped shellcheck "not installed on PATH"
             warn "shellcheck (not installed, skipping)"
         fi
 
         # Bashate — 4-space indentation check; policy flags come from
         # bashate_args (default: excludes E006, line length).
         if ! check_enabled bashate; then
-            skipped bashate
+            skipped bashate "disabled by checks.bashate.enabled"
             warn "bashate (disabled)"
         elif command -v bashate >/dev/null 2>&1; then
             ran bashate
@@ -701,7 +711,7 @@ else
                 fail "bashate (indentation required)"
             fi
         else
-            skipped bashate
+            skipped bashate "not installed on PATH"
             warn "bashate (not installed, skipping)"
         fi
 
@@ -720,7 +730,7 @@ else
         # Passing a printer flag also makes shfmt ignore any .editorconfig it finds, which keeps this
         # verdict identical inside the container and on a contributor's machine.
         if ! check_enabled shfmt; then
-            skipped shfmt
+            skipped shfmt "disabled by checks.shfmt.enabled"
             warn "shfmt (disabled)"
         elif command -v shfmt >/dev/null 2>&1; then
             ran shfmt
@@ -738,7 +748,7 @@ else
                 pass "shfmt"
             fi
         else
-            skipped shfmt
+            skipped shfmt "not installed on PATH"
             warn "shfmt (not installed, skipping)"
         fi
     done
@@ -778,7 +788,7 @@ else
 
         # flake8 (style); policy flags come from flake8_args.
         if ! check_enabled flake8; then
-            skipped flake8
+            skipped flake8 "disabled by checks.flake8.enabled"
             warn "flake8 (disabled)"
         elif command -v flake8 >/dev/null 2>&1; then
             ran flake8
@@ -795,14 +805,14 @@ else
                 fail "flake8"
             fi
         else
-            skipped flake8
+            skipped flake8 "not installed on PATH"
             warn "flake8 (not installed, skipping)"
         fi
 
         # black (formatting); harness flag --check is always kept so a run
         # never rewrites the target file; policy flags come from black_args.
         if ! check_enabled black; then
-            skipped black
+            skipped black "disabled by checks.black.enabled"
             warn "black (disabled)"
         elif command -v black >/dev/null 2>&1; then
             ran black
@@ -819,14 +829,14 @@ else
                 fail "black"
             fi
         else
-            skipped black
+            skipped black "not installed on PATH"
             warn "black (not installed, skipping)"
         fi
 
         # pylint (errors/warnings); harness flag --output-format=text is
         # always kept; policy flags come from pylint_args.
         if ! check_enabled pylint; then
-            skipped pylint
+            skipped pylint "disabled by checks.pylint.enabled"
             warn "pylint (disabled)"
         elif command -v pylint >/dev/null 2>&1; then
             ran pylint
@@ -845,7 +855,7 @@ else
                 fail "pylint"
             fi
         else
-            skipped pylint
+            skipped pylint "not installed on PATH"
             warn "pylint (not installed, skipping)"
         fi
 
@@ -858,7 +868,7 @@ else
         # mirrors pylint running with E0401 disabled. --cache-dir and
         # --no-error-summary are harness flags and are always kept.
         if ! check_enabled mypy; then
-            skipped mypy
+            skipped mypy "disabled by checks.mypy.enabled"
             warn "mypy (disabled)"
         elif command -v mypy >/dev/null 2>&1; then
             ran mypy
@@ -876,7 +886,7 @@ else
                 fail "mypy"
             fi
         else
-            skipped mypy
+            skipped mypy "not installed on PATH"
             warn "mypy (not installed, skipping)"
         fi
 
@@ -884,7 +894,7 @@ else
         # --msg-template are always kept (severity is the bandit.severity
         # option, not args); bandit has no default policy flags of its own.
         if ! check_enabled bandit; then
-            skipped bandit
+            skipped bandit "disabled by checks.bandit.enabled"
             warn "bandit (disabled)"
         elif command -v bandit >/dev/null 2>&1; then
             ran bandit
@@ -902,7 +912,7 @@ else
                 fail "bandit"
             fi
         else
-            skipped bandit
+            skipped bandit "not installed on PATH"
             warn "bandit (not installed, skipping)"
         fi
     done
@@ -945,7 +955,7 @@ else
         # in the built-in defaults above, before the loader runs). The array
         # expansion also replaces the former unquoted $MD_CONFIG word-split.
         if ! check_enabled markdownlint; then
-            skipped markdownlint
+            skipped markdownlint "disabled by checks.markdownlint.enabled"
             warn "markdownlint (disabled)"
         elif command -v markdownlint >/dev/null 2>&1; then
             ran markdownlint
@@ -968,7 +978,7 @@ else
                 fail "markdownlint"
             fi
         else
-            skipped markdownlint
+            skipped markdownlint "not installed on PATH"
             warn "markdownlint (not installed, skipping)"
         fi
     done
@@ -1003,8 +1013,8 @@ mapfile -t json_files < <(ml_files '*.json' -- '*/\.*' '*/node_modules/*' '*/ven
 if [ ${#yaml_files[@]} -eq 0 ] && [ ${#json_files[@]} -eq 0 ]; then
     echo "  (none found)"
 elif ! check_enabled yaml_prettier && ! check_enabled json_prettier; then
-    skipped yaml_prettier
-    skipped json_prettier
+    skipped yaml_prettier "disabled by checks.yaml_prettier.enabled"
+    skipped json_prettier "disabled by checks.json_prettier.enabled"
     warn "YAML/JSON checks (disabled)"
 elif command -v prettier >/dev/null 2>&1; then
     for f in "${yaml_files[@]}" "${json_files[@]}"; do
@@ -1018,7 +1028,7 @@ elif command -v prettier >/dev/null 2>&1; then
         # always kept.
         if [[ "$f" == *.yaml || "$f" == *.yml ]]; then
             if ! check_enabled yaml_prettier; then
-                skipped yaml_prettier
+                skipped yaml_prettier "disabled by checks.yaml_prettier.enabled"
                 warn "yaml prettier (disabled)"
             else
                 ran yaml_prettier
@@ -1038,7 +1048,7 @@ elif command -v prettier >/dev/null 2>&1; then
             fi
         elif [[ "$f" == *.json ]]; then
             if ! check_enabled json_prettier; then
-                skipped json_prettier
+                skipped json_prettier "disabled by checks.json_prettier.enabled"
                 warn "json prettier (disabled)"
             else
                 ran json_prettier
@@ -1059,8 +1069,8 @@ elif command -v prettier >/dev/null 2>&1; then
         fi
     done
 else
-    skipped yaml_prettier
-    skipped json_prettier
+    skipped yaml_prettier "not installed on PATH"
+    skipped json_prettier "not installed on PATH"
     warn "prettier (not installed, skipping YAML/JSON checks)"
 fi
 
@@ -1092,7 +1102,7 @@ if [ ${#toml_files[@]} -eq 0 ]; then
     echo "  (none found)"
 else
     if ! check_enabled toml_sort; then
-        skipped toml_sort
+        skipped toml_sort "disabled by checks.toml_sort.enabled"
         warn "TOML checks (disabled)"
     elif command -v toml-sort >/dev/null 2>&1; then
         for f in "${toml_files[@]}"; do
@@ -1117,7 +1127,7 @@ else
             fi
         done
     else
-        skipped toml_sort
+        skipped toml_sort "not installed on PATH"
         warn "toml-sort (not installed, skipping TOML checks)"
     fi
 fi
@@ -1148,7 +1158,7 @@ info "Running security scans..."
 # security_secrets and security_dangerous_patterns resolve independently --
 # each has its own "checks.<name>.enabled" in .multilint.json.
 if ! check_enabled security_secrets; then
-    skipped security_secrets
+    skipped security_secrets "disabled by checks.security_secrets.enabled"
     warn "security_secrets (disabled)"
 else
     # --- Hardcoded secrets in shell scripts ---
@@ -1205,7 +1215,7 @@ else
 fi
 
 if ! check_enabled security_dangerous_patterns; then
-    skipped security_dangerous_patterns
+    skipped security_dangerous_patterns "disabled by checks.security_dangerous_patterns.enabled"
     warn "security_dangerous_patterns (disabled)"
 else
     # --- Dangerous shell patterns ---
@@ -1254,7 +1264,7 @@ done
 info "Running gitleaks..."
 
 if ! check_enabled gitleaks; then
-    skipped gitleaks
+    skipped gitleaks "disabled by checks.gitleaks.enabled"
     warn "gitleaks (disabled)"
 elif command -v gitleaks >/dev/null 2>&1; then
     # Which directory to search for a repository. TARGET_DIR is "$1", and both plugins pass a single
@@ -1350,11 +1360,13 @@ elif command -v gitleaks >/dev/null 2>&1; then
         fail "gitleaks"
     else
         echo "$gitleaks_output" | head -10
-        skipped gitleaks
+        # The last non-empty line is gitleaks' own error ("unable to load config", ...).
+        gitleaks_error="$(printf '%s\n' "$gitleaks_output" | grep -v '^[[:space:]]*$' | tail -n 1)"
+        skipped gitleaks "did not complete (exit $gitleaks_rc): ${gitleaks_error:-no output}"
         warn "gitleaks (did not complete, exit $gitleaks_rc)"
     fi
 else
-    skipped gitleaks
+    skipped gitleaks "not installed on PATH"
     warn "gitleaks (not installed, skipping)"
 fi
 
@@ -1429,6 +1441,8 @@ if [ "$OUTPUT_FORMAT" = "json" ]; then
             status="failed"
         fi
         export "ML_CHECK_${check}=${failures}:${threshold}:${threshold_exceeded}:${status}:${total}"
+        # Separate variable: a reason can contain ":" and would break the record above.
+        export "ML_REASON_${check}=${check_reason[$check]}"
     done
     # Build file list as comma-separated
     ML_FILES=""
@@ -1497,6 +1511,10 @@ for name in os.environ.get("ML_CHECK_ORDER", "").split(","):
             # indistinguishable from one that ran and found nothing.
             "status": parts[STATUS],
         }
+        # Only skipped checks carry one: why the check did not run.
+        reason = os.environ.get("ML_REASON_" + name, "")
+        if parts[STATUS] == "skipped" and reason:
+            checks[name]["reason"] = reason
 
 
 # Findings: each tool's native line format parsed into {file, line, rule,

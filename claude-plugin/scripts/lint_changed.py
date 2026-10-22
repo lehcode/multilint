@@ -1,0 +1,1065 @@
+#!/usr/bin/env python3
+"""PostToolUse hook body: lint the edited file in an ephemeral container.
+
+Reads the hook payload on stdin, decides whether the edited file changed, lints it in one ephemeral
+Docker container (`docker run --rm`), and reports failing or skipped checks back to Claude.
+
+The container runs the plugin's own lint.sh, mounted read-only at /opt/multilint, so the engine
+always matches the plugin; the image supplies only the linters. The scope root is mounted read-only
+at its own path (an identity mount), so the container sees every file at the path the host calls it.
+
+Scope root is the enclosing git repository when there is one, otherwise the edited file's directory.
+It is the only source root mounted, and also the container's working directory.
+
+The target is the file the hook reported, and only that file. An earlier version collected every
+dirty and untracked file in the repository and linted up to 25 of them per edit, which meant one
+`Write` in a dirty tree reported on files the user had not touched. The hook fires once per write
+with one `file_path`; that file is the subject.
+
+A SQLite table records (size, mtime_ns, sha256) per path, so re-saving identical bytes is a no-op
+rather than a second identical verdict. It also caches base folder -> repository root, because every
+file in a directory shares its repository and re-walking the ancestors on every edit is wasted work.
+Cached roots are re-stat'ed before use: `git init`, `rm -rf .git` and a clone all change the answer,
+and a stale cache would serve a wrong one.
+
+The repository search stops at $HOME. Unbounded, it reaches `/`, and since the scope root is what
+gets bind-mounted, an edit to a file in a system directory would mount that directory.
+
+The database deliberately lives outside ~/.claude/. Writes under ~/.claude/plugins/data/ raise the
+protected-directory permission prompt even under bypassPermissions
+(github.com/anthropics/claude-code/issues/41156), which would prompt on every edit, and in Cowork
+that path is per-conversation (issue #51398).
+
+POSIX only. WSL counts and needs nothing extra; native Windows is not a target, so `os.getuid()` is
+called directly rather than guarded.
+
+Always exits 0, so an edit is never blocked. An unreadable payload or an unsupported file is a silent
+no-op. A file that cannot be linted (no docker, a daemon or pull failure, a timeout, no readable
+result) gets a notice saying so, because silence there reads exactly like a clean file.
+
+Docker is the single dependency. The container is sandboxed: `--network none`, `--memory 2g`,
+`--cpus 2`, `--user <uid>:<gid>`, and both mounts read-only.
+"""
+
+# Required, not stylistic. This module runs on the *host* interpreter, which the
+# plugin does not control, and it annotates with PEP 604 unions (`Path | None`).
+# Those are evaluated at function-definition time on Python 3.9, so importing
+# this file raised TypeError there. Deferring annotations drops the floor to 3.7.
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import secrets
+import shutil
+import sqlite3
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+LINTABLE_SUFFIXES = {".sh", ".bash", ".py", ".md", ".yaml", ".yml", ".json", ".toml"}
+
+# SKIP_DIRS, MAX_SCAN_FILES and MAX_LINT_TARGETS used to live here. They existed to make a tree walk
+# survivable: the hook collected every dirty and untracked file in the repository, pruned the
+# directories it knew to be uninteresting, hashed up to 2000 of them, and capped the result at 25 per
+# run. All three are gone with the walk. The hook receives one file_path per invocation, so a
+# 2000-file "changed set" never described 2000 simultaneous saves — it described a dirty repository —
+# and a cap on a list that can only hold one element is not a guard.
+
+# Published on Docker Hub, which serves anonymous pulls; ghcr.io carries the same tags but can
+# require a token. Override the "image" hook-setting to run a local build instead
+# (`python3 lint_changed.py --set image local/build:dev`).
+# Pinned to the release that ships this plugin, never :latest, so the toolchain cannot drift from
+# the engine. release-please bumps the tag through the marker comment.
+DEFAULT_IMAGE = "lehcode/multilint:v0.2.1"  # x-release-please-version
+
+# Wall-clock ceiling for the whole container, not per file. Generous because a first pull has to
+# fetch the image, and a timeout here means the edit is reported as unchecked rather than clean.
+RUN_TIMEOUT_SECONDS = 300
+
+# Resource caps, so the hook cannot starve the machine it runs on.
+MEMORY_LIMIT = "2g"
+CPU_LIMIT = "2"
+
+# Separator printed to stdout before each file's JSON document, so one run producing N
+# documents can be split back apart. Chosen to be something no linter emits.
+FILE_MARKER = "===MULTILINT-FILE==="
+
+# Where the plugin's scripts/ directory (lint.sh included) is mounted read-only in the container.
+CONTAINER_SCRIPTS = "/opt/multilint"
+
+# The two host-plugin settings that are not linter configuration -- they shape how the plugin runs,
+# not what a check does -- live in a `settings` table inside the same state database, written only
+# through this CLI (`--set`/`--get`/`--unset`) and read read-only by the OpenCode plugin. Environment
+# variables are not a multilint configuration surface (user decision, 2026-09-30); MULTILINT_IMAGE,
+# MULTILINT_SEARCH_CEILING and MULTILINT_STATE_DIR are retired with no environment replacement.
+SETTINGS_KEYS = ("image", "search_ceiling")
+
+# Nothing is filtered out of the skipped set any more. gitleaks used to be listed here because
+# lint.sh gated it on "$TARGET_DIR/.git" and a single-file target can never satisfy that, so it was
+# reported skipped after every edit. lint.sh now selects `--no-git` when there is no repository, so
+# the check produces a real verdict either way and a skip means something again.
+STRUCTURALLY_SKIPPED: frozenset[str] = frozenset()
+
+# Cap on the text handed back to Claude. The full lint output of a failing directory runs to several
+# kilobytes; only the failing lines are worth the context.
+MAX_CONTEXT_CHARS = 4000
+# The message lint.sh gives a formatter finding; the check's "fix" line already says it, so it is not repeated.
+FORMAT_ONLY_MESSAGE = "formatting required"
+
+
+def state_dir() -> Path:
+    """Directory holding the change-tracking and settings database.
+
+    Fixed path, no override: XDG_STATE_HOME is honoured because it is the XDG base-directory
+    standard, not a multilint-specific control. MULTILINT_STATE_DIR is retired with no replacement.
+    """
+    xdg = os.environ.get("XDG_STATE_HOME")
+    # The XDG spec makes a relative value invalid, to be ignored. Honouring it would place the
+    # database relative to whatever directory the hook runs in, and as_uri() rejects it outright.
+    base = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "state"
+    return base / "multilint"
+
+
+# Settings-read failures collected during this run, surfaced with the lint.sh config warnings.
+SETTING_WARNINGS: list[str] = []
+
+
+def has_control_char(value: str) -> bool:
+    """True if value contains a C0 control character or DEL, mirroring the .multilint.json loader."""
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
+def check_setting_key(key: str) -> None:
+    """Raise ValueError unless key is one of SETTINGS_KEYS, so a typo never reads as success."""
+    if key not in SETTINGS_KEYS:
+        raise ValueError(f"unknown settings key: {key!r} (allowed: {', '.join(SETTINGS_KEYS)})")
+
+
+def read_setting(key: str) -> str | None:
+    """Value stored for key, or None when nothing is set or the database cannot be read.
+
+    A missing database, table or row is the ordinary "nothing set" answer and stays silent. Any
+    other failure (still locked after the timeout, corrupt file, unreadable) also falls back to the
+    built-in default, but says so on stderr and in SETTING_WARNINGS.
+    """
+    database = state_dir() / "changes.db"
+    if not database.exists():
+        return None
+    try:
+        # Read-only URI: a plain connect() would create an empty changes.db as a side effect of a
+        # lookup.
+        connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=10)
+        try:
+            row = connection.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error) as error:
+        if "no such table" in str(error):
+            return None
+        message = f"could not read the {key!r} setting from {database}, using the default: {error}"
+        SETTING_WARNINGS.append(message)
+        print(f"lint_changed.py: {message}", file=sys.stderr)
+        return None
+    return row[0] if row is not None else None
+
+
+def write_setting(key: str, value: str) -> None:
+    """Validate and upsert a setting. Raises ValueError on an unknown key or an invalid value."""
+    check_setting_key(key)
+    if value == "" or has_control_char(value):
+        raise ValueError(f"invalid value for {key!r}: must be non-empty with no control characters")
+    # A relative ceiling would resolve against whatever directory the hook happens to run in.
+    if key == "search_ceiling" and not Path(value).expanduser().is_absolute():
+        raise ValueError(f"invalid value for {key!r}: must be an absolute path (or start with ~)")
+    # The image lands in docker's argv; a leading '-' would be parsed as a docker option.
+    if key == "image" and (value.startswith("-") or any(c.isspace() for c in value)):
+        raise ValueError(f"invalid value for {key!r}: an image reference cannot start with '-' or contain spaces")
+    connection = open_state()
+    if connection is None:
+        raise ValueError(f"could not open the settings database at {state_dir() / 'changes.db'}")
+    try:
+        connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value, now_stamp()),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def unset_setting(key: str) -> None:
+    """Delete key's row, if present. Not an error when there was nothing to delete."""
+    check_setting_key(key)
+    connection = open_state()
+    if connection is None:
+        return
+    try:
+        connection.execute("DELETE FROM settings WHERE key = ?", (key,))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def resolve_image() -> str:
+    """Image to run. The "image" hook-setting overrides the published default."""
+    return read_setting("image") or DEFAULT_IMAGE
+
+
+def container_program() -> str:
+    """The bash program run inside the container.
+
+    One lint.sh run per file, in one container. lint.sh takes a single target and has no
+    multi-target mode.
+
+    Each document is preceded by a marker line so the combined stdout can be split back into one
+    result per file. In JSON mode lint.sh sends human-readable output to stderr and only JSON to
+    stdout, so stdout stays parsable.
+
+    `|| rc=1` rather than `set -e`: a failing file must not stop the remaining files from being
+    checked, but the overall exit status should still reflect that something failed.
+    """
+    return (
+        "rc=0\n"
+        'for f in "$@"; do\n'
+        f'    printf "%s%s\\n" "{FILE_MARKER}" "$f"\n'
+        # Also on stderr, because that is where lint.sh sends the human-readable findings in JSON
+        # mode. Without a marker there, the detail for N files arrives as one undivided blob and
+        # cannot be attributed to the file it belongs to.
+        f'    printf "%s%s\\n" "{FILE_MARKER}" "$f" >&2\n'
+        f'    bash {CONTAINER_SCRIPTS}/lint.sh "$f" --format json || rc=1\n'
+        "done\n"
+        "exit $rc\n"
+    )
+
+
+def scripts_dir() -> Path:
+    """The plugin's scripts directory: this module's own directory, which also holds lint.sh."""
+    return Path(__file__).resolve().parent
+
+
+def bind_mount(source: str, target: str) -> str:
+    """A read-only `--mount` spec. Docker parses it as CSV, so a path holding ',' or '"' is quoted."""
+
+    def field(key: str, value: str) -> str:
+        text = f"{key}={value}"
+        return '"' + text.replace('"', '""') + '"' if ("," in text or '"' in text) else text
+
+    return ",".join(["type=bind", field("source", source), field("target", target), "readonly"])
+
+
+def container_name() -> str:
+    """A unique name, so a timed-out container can be found and removed."""
+    return f"multilint-{os.getpid()}-{secrets.token_hex(4)}"
+
+
+def build_docker_argv(
+    scope_root: Path, relative_paths: list[str], image: str | None = None, name: str | None = None
+) -> list[str]:
+    """Assemble the full `docker run` argv.
+
+    Runs nothing, so tests can assert on the exact arguments without Docker present.
+
+    Two mounts are used:
+
+    1. **Identity mount** — source and target are the same absolute path. The container sees the file
+       at the path the host calls it, so no translation table exists to be wrong or out of date.
+    2. **Scripts mount** — the plugin's scripts directory at ``/opt/multilint``, so the container
+       runs this plugin's lint.sh rather than any copy baked into the image.
+
+    ``--mount`` rather than ``-v``: the ``-v src:dst:opts`` form is colon-delimited, and in zsh
+    ``"$PWD:$PWD:ro"`` silently becomes ``.../multilint:.../multilinto``, because ``:r`` is a
+    parameter modifier that applies even inside double quotes. That produced a container mounted
+    read-write at the wrong target, an empty working directory, and a lint run that reported success
+    having examined nothing. ``--mount`` takes named keys and cannot be misread that way.
+    """
+    root = str(scope_root)
+    argv = [
+        "docker",
+        "run",
+        "--rm",
+        "--name",
+        name or container_name(),
+        # No linter needs the network. gitleaks reads local history; every other tool reads files.
+        "--network",
+        "none",
+        "--memory",
+        MEMORY_LIMIT,
+        "--cpus",
+        CPU_LIMIT,
+        # Identity mount: source root at the same path inside the container.
+        "--mount",
+        bind_mount(root, root),
+        "--mount",
+        bind_mount(str(scripts_dir()), CONTAINER_SCRIPTS),
+        "--workdir",
+        root,
+        # lint.sh resolves .multilint.json and .markdownlint.json relative to the working directory,
+        # so the scope root has to be the working directory for per-project config to apply.
+        "--entrypoint",
+        "bash",
+        # Run as the invoking user so nothing in the container acts as root, whatever USER the image
+        # declares. POSIX only, which includes WSL; native Windows is not a target.
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+    ]
+    argv += [image or resolve_image(), "-c", container_program(), "_"]
+    argv += relative_paths
+    return argv
+
+
+def edited_file_from_payload(payload: dict) -> Path | None:
+    """Pull the edited file out of the hook payload.
+
+    tool_input.file_path is the documented field; tool_response.file_path is the fallback. Note
+    snake_case: an earlier version of this hook read tool_response.filePath, which never matched.
+    """
+    for source in ("tool_input", "tool_response"):
+        section = payload.get(source)
+        if isinstance(section, dict):
+            candidate = section.get("file_path")
+            if isinstance(candidate, str) and candidate:
+                return Path(candidate)
+    return None
+
+
+def search_ceiling() -> Path:
+    """Highest directory the repository search may reach.
+
+    The user's home directory, unless the "search_ceiling" hook-setting overrides it, for a
+    checkout kept outside $HOME.
+    """
+    value = read_setting("search_ceiling")
+    return Path(value).expanduser() if value else Path.home()
+
+
+def find_git_root(start: Path) -> Path | None:
+    """Nearest ancestor containing a .git entry, searching no higher than $HOME.
+
+    The bound is the point of this function. An unbounded walk reaches `/`, and because the scope
+    root is the working directory for lint.sh, an edit to a file sitting directly in a system
+    directory would make that directory the scope root. That is not hypothetical: the state database
+    accumulated a full recursive walk of /etc, which can only happen if /etc became the scope root.
+
+    A path outside the ceiling has no ancestors worth searching, so None is returned without a
+    single stat. Blocklisting directory names would have been the fragile version of this.
+    """
+    ceiling = search_ceiling().resolve()
+    try:
+        resolved = start.resolve()
+    except OSError:
+        return None
+    if resolved != ceiling and ceiling not in resolved.parents:
+        return None
+    for directory in (resolved, *resolved.parents):
+        if (directory / ".git").exists():
+            return directory
+        if directory == ceiling:
+            break
+    return None
+
+
+def digest_of(path: Path) -> str:
+    """SHA-256 of a file, read in chunks so a large file does not land in memory."""
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def now_stamp() -> str:
+    """Event timestamp: ISO-8601, UTC, second resolution.
+
+    Text rather than an epoch integer because these rows are read by a human diagnosing why a file
+    was or was not linted, and ISO-8601 sorts correctly as a string anyway.
+    """
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def open_state() -> sqlite3.Connection | None:
+    """Open the state database and bring its schema up to date, or None if unusable.
+
+    Migration rather than CREATE TABLE alone: this database already exists in the field with the
+    original four columns, so the added ones arrive through ALTER TABLE. A duplicate-column error
+    means another process migrated first, which is a success, not a failure.
+    """
+    directory = state_dir()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(directory / "changes.db", timeout=10)
+    except (OSError, sqlite3.Error):
+        return None
+
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS seen (path TEXT PRIMARY KEY, size INTEGER, mtime_ns INTEGER, digest TEXT)"
+        )
+        existing = {row[1] for row in connection.execute("PRAGMA table_info(seen)")}
+        for column, ddl in (
+            ("in_git", "in_git INTEGER"),
+            ("git_root", "git_root TEXT"),
+            ("first_seen_at", "first_seen_at TEXT"),
+            ("last_seen_at", "last_seen_at TEXT"),
+            ("last_linted_at", "last_linted_at TEXT"),
+            ("last_notice", "last_notice TEXT"),
+        ):
+            if column not in existing:
+                connection.execute(f"ALTER TABLE seen ADD COLUMN {ddl}")
+        # Base folder -> repository root. Every file in a directory shares its repository, so one
+        # cached answer serves all of them and a later edit costs a string comparison rather than an
+        # ancestor walk. git_root is NULL when the folder is in no repository, which is a cached
+        # answer too, not a cache miss.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS folders ("
+            "folder TEXT PRIMARY KEY, git_root TEXT, resolved_at TEXT, last_used_at TEXT)"
+        )
+        # Host-plugin settings (image, search_ceiling) that replaced MULTILINT_IMAGE and
+        # MULTILINT_SEARCH_CEILING. Same database, same migration, so there is one file and one lock.
+        connection.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+        connection.commit()
+    except sqlite3.Error:
+        connection.close()
+        return None
+    return connection
+
+
+def touch_folder(connection: sqlite3.Connection, key: str, stamp: str) -> None:
+    """Bump last_used_at for a cached folder; a failed write costs nothing, so it is swallowed."""
+    try:
+        connection.execute("UPDATE folders SET last_used_at = ? WHERE folder = ?", (stamp, key))
+        connection.commit()
+    except sqlite3.Error:
+        pass
+
+
+def store_folder(connection: sqlite3.Connection, key: str, resolved: Path | None, stamp: str) -> None:
+    """Upsert the resolved root for a folder; a failed write only means the next call re-resolves."""
+    try:
+        connection.execute(
+            "INSERT INTO folders (folder, git_root, resolved_at, last_used_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(folder) DO UPDATE SET git_root=excluded.git_root, "
+            "resolved_at=excluded.resolved_at, last_used_at=excluded.last_used_at",
+            (key, str(resolved) if resolved else None, stamp, stamp),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        pass
+
+
+def cached_git_root(connection: sqlite3.Connection | None, folder: Path) -> tuple[Path | None, bool]:
+    """Repository root for a folder, from cache when the cache is still true.
+
+    Returns (root, from_cache). A cached root is re-stat'ed before being trusted, because the answer
+    is not stable: `git init`, `rm -rf .git`, a clone or a moved directory all change it. One stat is
+    cheaper than the ancestor walk it replaces and cannot serve a wrong answer. A cached "no
+    repository" is re-checked the same way, since a repository can appear where there was none.
+    """
+    key = str(folder)
+    stamp = now_stamp()
+    if connection is None:
+        return find_git_root(folder), False
+
+    row = None
+    try:
+        row = connection.execute("SELECT git_root FROM folders WHERE folder = ?", (key,)).fetchone()
+    except sqlite3.Error:
+        return find_git_root(folder), False
+
+    if row is not None:
+        recorded = row[0]
+        if recorded and (Path(recorded) / ".git").exists():
+            touch_folder(connection, key, stamp)
+            return Path(recorded), True
+        if recorded is None and find_git_root(folder) is None:
+            touch_folder(connection, key, stamp)
+            return None, True
+
+    resolved = find_git_root(folder)
+    store_folder(connection, key, resolved, stamp)
+    return resolved, False
+
+
+def record_and_check(
+    connection: sqlite3.Connection | None,
+    path: Path,
+    git_root: Path | None,
+) -> bool:
+    """Record what this file looks like now; return True when its content differs from last time.
+
+    Applies to repository files as well as loose ones. Under git the file is dirty by definition once
+    it has been written, so the digest is the only thing that distinguishes "saved with changes" from
+    "saved identical content", and re-linting the latter tells the user nothing.
+
+    The stored report survives an identical save, so it can be repeated, and is dropped when the
+    content changes, because it described bytes that are gone. record_report() writes the new one
+    once the lint has run.
+
+    Without a database every write counts as a change: linting twice is wasteful, but skipping a real
+    change is a false clean, and only one of those two errors is acceptable.
+    """
+    try:
+        stat = path.stat()
+        digest = digest_of(path)
+    except OSError:
+        return False
+    if connection is None:
+        return True
+
+    key = str(path)
+    stamp = now_stamp()
+    try:
+        row = connection.execute("SELECT digest FROM seen WHERE path = ?", (key,)).fetchone()
+        changed = row is None or row[0] != digest
+        connection.execute(
+            "INSERT INTO seen (path, size, mtime_ns, digest, in_git, git_root, "
+            "first_seen_at, last_seen_at, last_linted_at, last_notice) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, "
+            "digest=excluded.digest, in_git=excluded.in_git, git_root=excluded.git_root, "
+            "first_seen_at=COALESCE(seen.first_seen_at, excluded.first_seen_at), "
+            "last_seen_at=excluded.last_seen_at, "
+            "last_linted_at=CASE WHEN excluded.last_linted_at IS NULL THEN seen.last_linted_at "
+            "ELSE excluded.last_linted_at END, "
+            "last_notice=CASE WHEN seen.digest IS excluded.digest THEN seen.last_notice ELSE NULL END",
+            (
+                key,
+                stat.st_size,
+                stat.st_mtime_ns,
+                digest,
+                1 if git_root is not None else 0,
+                str(git_root) if git_root else None,
+                stamp,
+                stamp,
+                stamp if changed else None,
+                None,
+            ),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        return True
+    return changed
+
+
+def split_stream(text: str) -> dict[str, str]:
+    """Split a marker-delimited stream into {file: body}."""
+    sections: dict[str, str] = {}
+    for block in text.split(FILE_MARKER):
+        if not block.strip():
+            continue
+        name, _, body = block.partition("\n")
+        sections[name.strip()] = body
+    return sections
+
+
+class LintUnavailable(Exception):
+    """lint.sh could not produce a result; the message says why."""
+
+
+def parse_results(proc: subprocess.CompletedProcess) -> list[tuple[str, dict, str]]:
+    """Split the container's marker-delimited output into (file, JSON document, detail) per file.
+
+    Raises LintUnavailable when no document parses, naming docker's own error when there is one.
+    """
+    details = split_stream(proc.stderr)
+    results: list[tuple[str, dict, str]] = []
+    for name, body in split_stream(proc.stdout).items():
+        try:
+            document = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(document, dict):
+            results.append((name, document, details.get(name, "")))
+    if not results:
+        # Docker reports daemon, pull and mount errors on stderr before the first marker; lint.sh's own
+        # output comes after it. The last of those lines is the one that says what went wrong.
+        docker_lines = [line.strip() for line in proc.stderr.split(FILE_MARKER, 1)[0].splitlines() if line.strip()]
+        reason = f"exit status {proc.returncode}" + (f": {docker_lines[-1]}" if docker_lines else "")
+        raise LintUnavailable(f"the ephemeral container produced no readable result ({reason})")
+    return results
+
+
+def run_lint(scope_root: Path, relative_paths: list[str]) -> list[tuple[str, dict, str]]:
+    """Run one container over every changed file.
+
+    Returns (file, JSON document, human-readable detail) per file. A document that will not parse is
+    dropped rather than guessed at, so a malformed result is never reported as a finding.
+
+    Raises LintUnavailable when nothing could be determined — no docker, a daemon or pull failure, a
+    timeout, no readable document — so the caller can say the file is unverified instead of staying
+    silent.
+    """
+    if shutil.which("docker") is None:
+        raise LintUnavailable("docker not found on PATH")
+    lint_sh = scripts_dir() / "lint.sh"
+    if not lint_sh.exists():
+        raise LintUnavailable(f"lint.sh not found at {lint_sh}")
+    name = container_name()
+    try:
+        proc = subprocess.run(
+            build_docker_argv(scope_root, relative_paths, name=name),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        # Killing the docker client leaves the container running; remove it by name. Best effort: a
+        # failed removal must not replace the notice with a crash.
+        try:
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise LintUnavailable(f"the ephemeral container did not finish within {RUN_TIMEOUT_SECONDS} s") from None
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LintUnavailable(f"docker could not be started: {exc}") from None
+
+    return parse_results(proc)
+
+
+def failing_checks(document: dict) -> list[str]:
+    """Names of checks that found something, as "name: N failure(s)"."""
+    reported = []
+    for name, check in sorted((document.get("checks") or {}).items()):
+        if not isinstance(check, dict):
+            continue
+        if check.get("status") == "failed" or (check.get("failed") or 0) > 0:
+            count = check.get("failed") or 0
+            reported.append(f"{name}: {count} failure(s)")
+    return reported
+
+
+def skipped_checks(document: dict) -> list[str]:
+    """Checks that did not run, excluding the ones that structurally never can.
+
+    A skipped check is not a pass, and before this the two were indistinguishable: a missing tool
+    reported zero failures exactly like a clean run. Surfacing it matters even when return_code is
+    0, which is why the caller cannot simply short-circuit on a zero exit.
+    """
+    names = document.get("summary", {}).get("checks_skipped")
+    if not isinstance(names, list):
+        return []
+    return [n for n in names if isinstance(n, str) and n not in STRUCTURALLY_SKIPPED]
+
+
+def skip_reasons(results: list) -> dict[str, str]:
+    """Why each skipped check did not run, from lint.sh's per-check "reason" (absent in older lint.sh)."""
+    reasons: dict[str, str] = {}
+    for _name, document, _detail in results:
+        checks = document.get("checks")
+        if not isinstance(checks, dict):
+            continue
+        for check, entry in checks.items():
+            if isinstance(entry, dict) and entry.get("status") == "skipped" and isinstance(entry.get("reason"), str):
+                reasons.setdefault(check, entry["reason"])
+    return reasons
+
+
+def failing_lines(stdout: str) -> list[str]:
+    """Only the lines that report a problem, so the context stays small."""
+    return [line.rstrip() for line in stdout.splitlines() if "✗" in line or "⚠" in line]
+
+
+def finding_location(item: dict) -> str:
+    """The "file:line" of a finding, or just "file" when the tool gave no line."""
+    file = item.get("file") or ""
+    return f"{file}:{item['line']}" if item.get("line") is not None and file else file
+
+
+def finding_line(item: dict) -> str | None:
+    """One notice line for a finding; None for a formatter's bare "formatting required"."""
+    if not isinstance(item, dict) or item.get("message") == FORMAT_ONLY_MESSAGE:
+        return None
+    parts = [item.get("rule"), item.get("symbol"), finding_location(item)]
+    return "  " + " ".join(str(part) for part in parts if part) + f"  {item.get('message') or ''}".rstrip()
+
+
+def check_block(name: str, check: dict) -> str:
+    """The notice block of one failed check: its fix line, then one line per finding."""
+    fix = check.get("fix")
+    lines = [f"{name} — {fix}" if isinstance(fix, str) and fix else name]
+    lines.extend(line for line in map(finding_line, check["findings"]) if line)
+    if check.get("findings_truncated"):
+        lines.append("  … more findings omitted")
+    return "\n".join(lines)
+
+
+def finding_blocks(document: dict) -> tuple[list[str], list[str]]:
+    """(failed check names, notice blocks) built from the "findings"/"fix" fields.
+
+    Both are empty for a document from an older lint.sh, whose checks carry counts only, so the caller can
+    fall back to the marker lines.
+    """
+    names: list[str] = []
+    blocks: list[str] = []
+    for name, check in (document.get("checks") or {}).items():
+        if isinstance(check, dict) and check.get("status") == "failed" and isinstance(check.get("findings"), list):
+            names.append(name)
+            blocks.append(check_block(name, check))
+    return names, blocks
+
+
+def failed_names(results: list) -> list[str]:
+    """Failed check names across every result, in lint.sh's check order, first appearance wins."""
+    return list(dict.fromkeys(n for _file, document, _detail in results for n in finding_blocks(document)[0]))
+
+
+def violated_rules(results: list) -> list[str]:
+    """Sorted unique rule IDs lint.sh reported across every result."""
+    rules: set[str] = set()
+    for _name, document, _detail in results:
+        listed = (document.get("summary") or {}).get("rules_violated")
+        if isinstance(listed, list):
+            rules.update(r for r in listed if isinstance(r, str))
+    return sorted(rules)
+
+
+def config_warnings(document: dict) -> list[str]:
+    """The lint.sh "warnings" field, or [] when the field is missing or malformed.
+
+    Independent of return_code: a malformed .multilint.json is a configuration mistake the user
+    needs to hear about even on a run that otherwise passed every check.
+    """
+    warnings = document.get("warnings")
+    if not isinstance(warnings, list):
+        return []
+    return [w for w in warnings if isinstance(w, str)]
+
+
+def resolve_edited_file(payload: dict) -> Path | None:
+    """Absolute path of the lintable file the payload edited, or None when there is nothing to lint."""
+    edited = edited_file_from_payload(payload)
+    if edited is None or edited.suffix not in LINTABLE_SUFFIXES:
+        return None
+
+    edited = edited.expanduser()
+    if not edited.is_absolute():
+        edited = (Path(payload.get("cwd") or ".") / edited).resolve()
+
+    if not edited.is_file():
+        return None
+    return edited
+
+
+def forget_change(path: Path) -> None:
+    """Drop the digest recorded for `path`, so saving the same bytes again is linted again.
+
+    Called when the lint could not run: the digest was recorded before linting, and keeping it would
+    turn the next identical save into a silent "unchanged" for a file that was never verified.
+    """
+    state = open_state()
+    if state is None:
+        return
+    try:
+        state.execute("DELETE FROM seen WHERE path = ?", (str(path),))
+        state.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        state.close()
+
+
+def changed_scope_root(edited: Path) -> Path | None:
+    """Scope root to lint in, or None when the file's content is the same as last time."""
+    # One connection for the whole invocation: the git-root cache and the digest record both use it,
+    # and opening it twice would be two migrations and two locks.
+    state = open_state()
+    try:
+        git_root, _from_cache = cached_git_root(state, edited.parent)
+
+        # Scope root is the repository when there is one, because lint.sh resolves .markdownlint.json
+        # against the working directory and gitleaks needs .git to scan history. Outside a repository
+        # it is the file's own directory, which is as narrow as the working directory can be while
+        # still letting lint.sh see the file.
+        scope_root = git_root if git_root is not None else edited.parent
+
+        if not record_and_check(state, edited, git_root):
+            # Same bytes as last time. Re-linting would produce the same verdict the user has already
+            # seen, so saying nothing is the correct answer rather than a missed check.
+            return None
+    finally:
+        if state is not None:
+            state.close()
+    return scope_root
+
+
+def record_report(path: Path, notices: list[str], summary: str) -> None:
+    """Remember the report for the content just linted; a clean verdict clears it.
+
+    Stored as JSON {"summary", "notices"} in seen.last_notice, so an identical save repeats exactly
+    what the user was told. Best effort: without the database the next identical save is linted again.
+    """
+    state = open_state()
+    if state is None:
+        return
+    value = json.dumps({"summary": summary, "notices": notices}) if notices else None
+    try:
+        state.execute("UPDATE seen SET last_notice = ? WHERE path = ?", (value, str(path)))
+        state.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        state.close()
+
+
+def stored_report(path: Path) -> tuple[list[str], str] | None:
+    """The (notices, summary) recorded for `path`'s current content, or None when it was clean."""
+    state = open_state()
+    if state is None:
+        return None
+    try:
+        row = state.execute("SELECT last_notice FROM seen WHERE path = ?", (str(path),)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        state.close()
+    try:
+        report = json.loads(row[0]) if row and row[0] else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(report, dict) or not isinstance(report.get("notices"), list):
+        return None
+    return [n for n in report["notices"] if isinstance(n, str)], str(report.get("summary", ""))
+
+
+def summarize_results(results: list) -> tuple[list[str], set[str], list[str], int]:
+    """Fold per-file lint results into (findings, skipped checks, config warnings, failed count).
+
+    A document that carries structured findings contributes its rendered check blocks; one from an older
+    lint.sh falls back to the marker lines of the human report.
+    """
+    findings: list[str] = []
+    skipped: set[str] = set()
+    warnings: list[str] = []
+    failed = 0
+    for name, document, detail in results:
+        skipped.update(skipped_checks(document))
+        warnings.extend(config_warnings(document))
+        if document.get("return_code") == 0:
+            continue
+        failed += 1
+        _names, blocks = finding_blocks(document)
+        if blocks:
+            findings.append("\n".join(blocks))
+            continue
+        lines = failing_lines(detail)
+        if not lines:
+            # Fall back to the structured counts when the human output carried no marked lines.
+            lines = failing_checks(document)
+        if lines:
+            findings.append(f"{name}:\n" + "\n".join(lines))
+    return findings, skipped, warnings, failed
+
+
+def structured_notice(relative: str, findings: list[str], names: list[str], rules: list[str]) -> str:
+    """Header, findings, Rules footer; only the findings are cut to fit MAX_CONTEXT_CHARS."""
+    header = f"multilint: {relative} failed " + ", ".join(names)
+    footer = ("Rules: " + " ".join(rules)) if rules else ""
+    body = "\n".join(findings)
+    budget = MAX_CONTEXT_CHARS - len(header) - len(footer) - 4
+    if len(body) > budget:
+        body = body[: max(budget - 2, 0)].rsplit("\n", 1)[0] + "\n…"
+    return "\n\n".join(part for part in (header, body, footer) if part)
+
+
+def skipped_notice(relative: str, skipped: set[str], reasons: dict[str, str]) -> str:
+    """One line per check that did not run; the reason is what tells the user what to fix."""
+    listed = "\n".join(f"  {name}: {reasons[name]}" if reasons.get(name) else f"  {name}" for name in sorted(skipped))
+    return f"multilint could not run these checks, so {relative} is unverified for them:\n{listed}"
+
+
+def build_notices(
+    relative: str,
+    findings: list[str],
+    skipped: set[str],
+    warnings: list[str],
+    failed: int,
+    names: list[str] | None = None,
+    rules: list[str] | None = None,
+    reasons: dict[str, str] | None = None,
+) -> list[str]:
+    """The user-facing notices, one per kind of problem; empty when there is nothing to report.
+
+    With failing check names the failure notice is the structured one: a header, the findings, then a
+    Rules footer. Only the findings are cut to fit MAX_CONTEXT_CHARS, never the header or the footer.
+    """
+    notices: list[str] = []
+    if failed and names:
+        notices.append(structured_notice(relative, findings, names, rules or []))
+    elif failed:
+        context = "\n\n".join(findings)[:MAX_CONTEXT_CHARS]
+        if not context:
+            context = "multilint reported failing checks but produced no parsable output."
+        notices.append(f"multilint found failing checks in {relative}.\n\n{context}")
+    if skipped:
+        # Reported even when everything passed. A check that did not run is not a check that passed,
+        # and the old contract could not tell the two apart.
+        notices.append(skipped_notice(relative, skipped, reasons or {}))
+    if warnings:
+        # Independent of return_code: a malformed .multilint.json is worth surfacing even when the
+        # run otherwise passed, the same way defect 1 (a silently-ignored threshold) went unnoticed.
+        notices.append("multilint: config warning: " + "; ".join(warnings))
+    return notices
+
+
+def read_payload() -> dict | None:
+    """The hook payload from stdin, or None when it is not a JSON object."""
+    try:
+        payload = json.loads(sys.stdin.read())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def main() -> int:
+    """Read the hook payload, lint what changed, and report failures on stdout."""
+    payload = read_payload()
+    if payload is None:
+        return 0
+
+    edited = resolve_edited_file(payload)
+    if edited is None:
+        return 0
+
+    scope_root = changed_scope_root(edited)
+    if scope_root is None:
+        report_unchanged(edited)
+    else:
+        lint_and_report(edited, scope_root)
+    return 0
+
+
+def report_unchanged(edited: Path) -> None:
+    """Same bytes as last time: repeat the stored verdict when it was not clean, otherwise stay silent.
+
+    Silence on an identical save is only correct when the user was told nothing to begin with; a file
+    that still fails would otherwise look fixed the second time it is written.
+    """
+    report = stored_report(edited)
+    if report is not None and report[0]:
+        notices, summary = report
+        emit(notices, summary + " (unchanged since last lint)")
+
+
+def report_summary(failed: int, skipped: set[str]) -> str:
+    """The one-line count shown before the notices."""
+    summary = []
+    if failed:
+        summary.append(f"{failed} file(s) with failing checks")
+    if skipped:
+        summary.append(f"{len(skipped)} check(s) skipped")
+    return ", ".join(summary) if summary else "configuration notice"
+
+
+def lint_and_report(edited: Path, scope_root: Path) -> None:
+    """Lint `edited` from `scope_root`, report problems, and remember the verdict for identical saves."""
+    # Relative to the scope root because that is the working directory for lint.sh.
+    try:
+        relative = edited.resolve().relative_to(scope_root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return
+
+    try:
+        results = run_lint(scope_root, [relative])
+    except LintUnavailable as exc:
+        forget_change(edited)
+        emit([f"multilint could not lint {relative}: {exc}. Treat the file as unverified."], "could not lint")
+        return
+
+    findings, skipped, warnings, failed = summarize_results(results)
+    warnings = SETTING_WARNINGS + warnings
+    notices = build_notices(
+        relative,
+        findings,
+        skipped,
+        warnings,
+        failed,
+        failed_names(results),
+        violated_rules(results),
+        skip_reasons(results),
+    )
+    summary = report_summary(failed, skipped)
+    record_report(edited, notices, summary)
+    if notices:
+        emit(notices, summary)
+
+
+def emit(notices: list[str], summary: str) -> None:
+    """Write the PostToolUse hook output: every notice to the user and to the model."""
+    # systemMessage is what the user sees, additionalContext what the model sees. Both carry the
+    # findings: a count alone tells the user something is wrong but not what.
+    msg = "multilint: " + summary
+    if notices:
+        msg = msg + "\n\n" + "\n\n".join(notices)
+    json.dump(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": "\n\n".join(notices),
+            },
+            "systemMessage": msg[:MAX_CONTEXT_CHARS],
+        },
+        sys.stdout,
+    )
+
+
+def run_settings_cli(argv: list[str]) -> int:
+    """Dispatch --set/--get/--unset. Returns the process exit code; never touches stdin.
+
+    Kept separate from main() so the two entry points can never be confused: the hook is always
+    invoked with an empty argv and reads its payload from stdin, while the CLI is always invoked
+    with a recognized flag and never reads stdin.
+    """
+    if not argv:
+        return 1
+    action, rest = argv[0], argv[1:]
+    try:
+        if action == "--set" and len(rest) == 2:
+            write_setting(rest[0], rest[1])
+            return 0
+        if action == "--get" and len(rest) == 1:
+            check_setting_key(rest[0])
+            value = read_setting(rest[0])
+            if value is not None:
+                print(value)
+            return 0
+        if action == "--unset" and len(rest) == 1:
+            unset_setting(rest[0])
+            return 0
+    except ValueError as error:
+        print(f"lint_changed.py: {error}", file=sys.stderr)
+        return 1
+    print("lint_changed.py: usage: --set KEY VALUE | --get KEY | --unset KEY", file=sys.stderr)
+    return 1
+
+
+def run_cli(root: str, target: str) -> int:
+    """`--run ROOT TARGET`: lint one target in the same ephemeral container the hook uses.
+
+    For the multilint agent, so the sandbox flags live in build_docker_argv() and nowhere else. Prints
+    lint.sh's JSON document on stdout and its human-readable findings on stderr; exits 1 with the
+    reason on stderr when the container could not produce a result.
+    """
+    try:
+        results = run_lint(Path(root).resolve(), [target])
+    except LintUnavailable as exc:
+        print(f"lint_changed.py: could not lint {target}: {exc}", file=sys.stderr)
+        return 1
+    for _name, document, detail in results:
+        sys.stderr.write(detail)
+        print(json.dumps(document))
+    return 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--run"]:
+        if len(sys.argv) != 4:
+            print("lint_changed.py: usage: --run ROOT TARGET", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(run_cli(sys.argv[2], sys.argv[3]))
+    if sys.argv[1:] and sys.argv[1] in ("--set", "--get", "--unset"):
+        sys.exit(run_settings_cli(sys.argv[1:]))
+    sys.exit(main())

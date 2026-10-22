@@ -487,7 +487,6 @@ def record_and_check(
     connection: sqlite3.Connection | None,
     path: Path,
     git_root: Path | None,
-    notice: str | None = None,
 ) -> bool:
     """Record what this file looks like now; return True when its content differs from last time.
 
@@ -495,8 +494,9 @@ def record_and_check(
     it has been written, so the digest is the only thing that distinguishes "saved with changes" from
     "saved identical content", and re-linting the latter tells the user nothing.
 
-    When the content has changed (or is new), `notice` is the rendered notice to store so it can
-    be re-emitted on unchanged re-writes that still fail or skip.
+    The stored report survives an identical save, so it can be repeated, and is dropped when the
+    content changes, because it described bytes that are gone. record_report() writes the new one
+    once the lint has run.
 
     Without a database every write counts as a change: linting twice is wasteful, but skipping a real
     change is a false clean, and only one of those two errors is acceptable.
@@ -524,7 +524,7 @@ def record_and_check(
             "last_seen_at=excluded.last_seen_at, "
             "last_linted_at=CASE WHEN excluded.last_linted_at IS NULL THEN seen.last_linted_at "
             "ELSE excluded.last_linted_at END, "
-            "last_notice=excluded.last_notice",
+            "last_notice=CASE WHEN seen.digest IS excluded.digest THEN seen.last_notice ELSE NULL END",
             (
                 key,
                 stat.st_size,
@@ -535,7 +535,7 @@ def record_and_check(
                 stamp,
                 stamp,
                 stamp if changed else None,
-                notice if changed else None,
+                None,
             ),
         )
         connection.commit()
@@ -643,6 +643,19 @@ def skipped_checks(document: dict) -> list[str]:
     if not isinstance(names, list):
         return []
     return [n for n in names if isinstance(n, str) and n not in STRUCTURALLY_SKIPPED]
+
+
+def skip_reasons(results: list) -> dict[str, str]:
+    """Why each skipped check did not run, from lint.sh's per-check "reason" (absent in older lint.sh)."""
+    reasons: dict[str, str] = {}
+    for _name, document, _detail in results:
+        checks = document.get("checks")
+        if not isinstance(checks, dict):
+            continue
+        for check, entry in checks.items():
+            if isinstance(entry, dict) and entry.get("status") == "skipped" and isinstance(entry.get("reason"), str):
+                reasons.setdefault(check, entry["reason"])
+    return reasons
 
 
 def failing_lines(stdout: str) -> list[str]:
@@ -773,18 +786,43 @@ def changed_scope_root(edited: Path) -> Path | None:
     return scope_root
 
 
-def stored_notice(path: Path) -> str | None:
-    """Retrieve the last rendered notice for `path` from the state DB, or None when clean/absent."""
+def record_report(path: Path, notices: list[str], summary: str) -> None:
+    """Remember the report for the content just linted; a clean verdict clears it.
+
+    Stored as JSON {"summary", "notices"} in seen.last_notice, so an identical save repeats exactly
+    what the user was told. Best effort: without the database the next identical save is linted again.
+    """
+    state = open_state()
+    if state is None:
+        return
+    value = json.dumps({"summary": summary, "notices": notices}) if notices else None
+    try:
+        state.execute("UPDATE seen SET last_notice = ? WHERE path = ?", (value, str(path)))
+        state.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        state.close()
+
+
+def stored_report(path: Path) -> tuple[list[str], str] | None:
+    """The (notices, summary) recorded for `path`'s current content, or None when it was clean."""
     state = open_state()
     if state is None:
         return None
     try:
         row = state.execute("SELECT last_notice FROM seen WHERE path = ?", (str(path),)).fetchone()
-        return row[0] if row and row[0] else None
     except sqlite3.Error:
         return None
     finally:
         state.close()
+    try:
+        report = json.loads(row[0]) if row and row[0] else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(report, dict) or not isinstance(report.get("notices"), list):
+        return None
+    return [n for n in report["notices"] if isinstance(n, str)], str(report.get("summary", ""))
 
 
 def summarize_results(results: list) -> tuple[list[str], set[str], list[str], int]:
@@ -827,6 +865,12 @@ def structured_notice(relative: str, findings: list[str], names: list[str], rule
     return "\n\n".join(part for part in (header, body, footer) if part)
 
 
+def skipped_notice(relative: str, skipped: set[str], reasons: dict[str, str]) -> str:
+    """One line per check that did not run; the reason is what tells the user what to fix."""
+    listed = "\n".join(f"  {name}: {reasons[name]}" if reasons.get(name) else f"  {name}" for name in sorted(skipped))
+    return f"multilint could not run these checks, so {relative} is unverified for them:\n{listed}"
+
+
 def build_notices(
     relative: str,
     findings: list[str],
@@ -835,6 +879,7 @@ def build_notices(
     failed: int,
     names: list[str] | None = None,
     rules: list[str] | None = None,
+    reasons: dict[str, str] | None = None,
 ) -> list[str]:
     """The user-facing notices, one per kind of problem; empty when there is nothing to report.
 
@@ -852,9 +897,7 @@ def build_notices(
     if skipped:
         # Reported even when everything passed. A check that did not run is not a check that passed,
         # and the old contract could not tell the two apart.
-        notices.append(
-            f"multilint could not run these checks, so {relative} is unverified for them: " + ", ".join(sorted(skipped))
-        )
+        notices.append(skipped_notice(relative, skipped, reasons or {}))
     if warnings:
         # Independent of return_code: a malformed .multilint.json is worth surfacing even when the
         # run otherwise passed, the same way defect 1 (a silently-ignored threshold) went unnoticed.
@@ -883,50 +926,74 @@ def main() -> int:
 
     scope_root = changed_scope_root(edited)
     if scope_root is None:
-        # Same bytes as last time. If the file still fails or skips, re-emit the stored notice.
-        notice = stored_notice(edited)
-        if notice:
-            emit([notice], "unchanged")
-        return 0
+        report_unchanged(edited)
+    else:
+        lint_and_report(edited, scope_root)
+    return 0
 
+
+def report_unchanged(edited: Path) -> None:
+    """Same bytes as last time: repeat the stored verdict when it was not clean, otherwise stay silent.
+
+    Silence on an identical save is only correct when the user was told nothing to begin with; a file
+    that still fails would otherwise look fixed the second time it is written.
+    """
+    report = stored_report(edited)
+    if report is not None and report[0]:
+        notices, summary = report
+        emit(notices, summary + " (unchanged since last lint)")
+
+
+def report_summary(failed: int, skipped: set[str]) -> str:
+    """The one-line count shown before the notices."""
+    summary = []
+    if failed:
+        summary.append(f"{failed} file(s) with failing checks")
+    if skipped:
+        summary.append(f"{len(skipped)} check(s) skipped")
+    return ", ".join(summary) if summary else "configuration notice"
+
+
+def lint_and_report(edited: Path, scope_root: Path) -> None:
+    """Lint `edited` from `scope_root`, report problems, and remember the verdict for identical saves."""
     # Relative to the scope root because that is the working directory for lint.sh.
     try:
         relative = edited.resolve().relative_to(scope_root.resolve()).as_posix()
     except (ValueError, OSError):
-        return 0
+        return
 
     try:
         results = run_lint(scope_root, [relative])
     except LintUnavailable as exc:
         forget_change(edited)
         emit([f"multilint could not lint {relative}: {exc}. Treat the file as unverified."], "could not lint")
-        return 0
+        return
 
     findings, skipped, warnings, failed = summarize_results(results)
     warnings = SETTING_WARNINGS + warnings
     notices = build_notices(
-        relative, findings, skipped, warnings, failed, failed_names(results), violated_rules(results)
+        relative,
+        findings,
+        skipped,
+        warnings,
+        failed,
+        failed_names(results),
+        violated_rules(results),
+        skip_reasons(results),
     )
-    if not notices:
-        return 0
-
-    summary = []
-    if failed:
-        summary.append(f"{failed} file(s) with failing checks")
-    if skipped:
-        summary.append(f"{len(skipped)} check(s) skipped")
-
-    emit(notices, ", ".join(summary) if summary else "configuration notice")
-    return 0
+    summary = report_summary(failed, skipped)
+    record_report(edited, notices, summary)
+    if notices:
+        emit(notices, summary)
 
 
 def emit(notices: list[str], summary: str) -> None:
-    """Write the PostToolUse hook output: findings for the user, summary for additionalContext."""
-    # systemMessage is what the user sees: include the actual findings, not just counts.
-    # additionalContext still carries all notices for the model.
+    """Write the PostToolUse hook output: every notice to the user and to the model."""
+    # systemMessage is what the user sees, additionalContext what the model sees. Both carry the
+    # findings: a count alone tells the user something is wrong but not what.
     msg = "multilint: " + summary
     if notices:
-        msg = msg + "\n\n" + notices[0]
+        msg = msg + "\n\n" + "\n\n".join(notices)
     json.dump(
         {
             "hookSpecificOutput": {
