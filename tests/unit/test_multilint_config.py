@@ -5,18 +5,16 @@ against a throwaway XDG_STATE_HOME, exactly as the tool does in use.
 """
 
 # pylint: disable=redefined-outer-name,protected-access
-import ast
 import importlib.util
 import json
 import os
-import re
 from pathlib import Path
 
+import ml_config_schema
 import pytest
 
 REPO = Path(__file__).parent.parent.parent
 SCRIPT_PATH = REPO / "core" / "multilint_config.py"
-LINT_SH = REPO / "core" / "lint.sh"
 CONSTANTS = ("ALL_CHECKS", "NO_ARGS_CHECKS", "CHECK_SETTING_KEYS", "OPTION_GROUPS")
 
 
@@ -204,20 +202,7 @@ class TestSettings:
         assert "lint_changed.py:" in capsys.readouterr().err
 
 
-def _heredoc_constants():
-    match = re.search(r"<<'ML_CONFIG_PY'\n(.*?)\nML_CONFIG_PY\n", LINT_SH.read_text(encoding="utf-8"), re.S)
-    assert match, "ML_CONFIG_PY heredoc not found in lint.sh; the drift guard cannot compare constants"
-    values = {}
-    for node in ast.parse(match.group(1)).body:
-        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
-            if node.targets[0].id in CONSTANTS:
-                values[node.targets[0].id] = ast.literal_eval(node.value)
-    return values
-
-
-class TestDriftGuard:
+class TestSharedConstants:
     @pytest.mark.parametrize("name", CONSTANTS)
-    def test_constant_matches_lint_sh(self, tool, name):
-        expected = _heredoc_constants()
-        assert name in expected, f"{name} not found in the lint.sh heredoc"
-        assert getattr(tool, name) == expected[name], f"{name} differs from lint.sh"
+    def test_constant_is_shared_with_schema(self, tool, name):
+        assert getattr(tool, name) is getattr(ml_config_schema, name), f"{name} is not the ml_config_schema object"

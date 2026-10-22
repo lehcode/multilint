@@ -2,12 +2,16 @@
 """Shared pytest fixtures for multilint tests."""
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Generator
 
 import pytest
 import pytest_mock
+
+# core/ holds scripts that import their siblings (multilint_config -> ml_config_schema); tests load them by path.
+sys.path.insert(0, str(Path(__file__).parent.parent / "core"))
 
 
 @pytest.fixture
