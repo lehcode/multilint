@@ -13,6 +13,11 @@ import pytest
 LINT_SH = Path(__file__).parent.parent.parent / "core" / "lint.sh"
 
 
+def engine_source() -> str:
+    """lint.sh plus the ml_*.sh files it sources: the bash engine as one text."""
+    return "\n".join(path.read_text(encoding="utf-8") for path in [LINT_SH, *sorted(LINT_SH.parent.glob("ml_*.sh"))])
+
+
 @pytest.fixture(autouse=True)
 def _ml_isolated_cwd(monkeypatch):
     """Run every test in this module from an empty directory.
@@ -172,7 +177,7 @@ class TestFeatureToggles:
         installed on the CI runner — a behavioural test would silently skip there, which is
         precisely where this regression would land unnoticed.
         """
-        source = LINT_SH.read_text(encoding="utf-8")
+        source = engine_source()
         assert "shfmt_args=(-i 4)" in source, "shfmt's default policy flags lost -i 4 and now contradict bashate"
         assert (
             'shfmt "${shfmt_args[@]+"${shfmt_args[@]}"}" -d "$f"' in source
