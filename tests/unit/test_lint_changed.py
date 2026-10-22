@@ -16,6 +16,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import ml_container
+import ml_repo
+import ml_report
+import ml_results
+import ml_settings
+import ml_state
 import pytest
 
 HOOK_PATH = Path(__file__).parent.parent.parent / "core" / "lint_changed.py"
@@ -34,7 +40,7 @@ def hook():
     return _load_module()
 
 
-def _set_ceiling(monkeypatch, hook_module, value):
+def _set_ceiling(monkeypatch, value):
     """Isolate search_ceiling() without a real settings database.
 
     MULTILINT_SEARCH_CEILING is retired with no environment replacement, so tests that used to
@@ -43,7 +49,7 @@ def _set_ceiling(monkeypatch, hook_module, value):
     in TestHookSettings.
     """
     monkeypatch.setattr(
-        hook_module,
+        ml_settings,
         "read_setting",
         lambda key: str(value) if key == "search_ceiling" else None,
     )
@@ -54,25 +60,25 @@ class TestContainerProgram:
 
     def test_program_keeps_going_after_a_failing_file(self, hook):
         """One bad file must not stop the rest from being checked, but the run must still fail."""
-        program = hook.container_program()
+        program = ml_container.container_program()
         assert "|| rc=1" in program
         assert "exit $rc" in program
 
     def test_program_marks_both_streams(self, hook):
         """JSON lands on stdout and human findings on stderr, so both need the marker to be
         split back into per-file results."""
-        program = hook.container_program()
-        assert program.count(hook.FILE_MARKER) == 2
+        program = ml_container.container_program()
+        assert program.count(ml_container.FILE_MARKER) == 2
         assert ">&2" in program
 
     def test_program_runs_container_lint_sh(self, hook):
         """The program runs lint.sh from CONTAINER_SCRIPTS, not a host path."""
-        program = hook.container_program()
-        assert f"{hook.CONTAINER_SCRIPTS}/lint.sh" in program
+        program = ml_container.container_program()
+        assert f"{ml_container.CONTAINER_SCRIPTS}/lint.sh" in program
 
     def test_program_has_no_host_path_reference(self, hook):
         """No /usr/local/bin or other host path in the program."""
-        program = hook.container_program()
+        program = ml_container.container_program()
         assert "/usr/local/bin" not in program
 
 
@@ -81,40 +87,40 @@ class TestImageResolution:
 
     def test_default_image_is_a_pinned_release_tag(self, hook):
         """A release tag, never :latest; release-please rewrites the version, so match the shape."""
-        assert re.fullmatch(r"lehcode/multilint:v\d+\.\d+\.\d+", hook.DEFAULT_IMAGE)
+        assert re.fullmatch(r"lehcode/multilint:v\d+\.\d+\.\d+", ml_settings.DEFAULT_IMAGE)
 
     @pytest.mark.parametrize("value", ["--privileged", "-v", "bad image"])
     def test_image_setting_rejects_docker_options_and_spaces(self, hook, monkeypatch, tmp_path, value):
-        monkeypatch.setattr(hook, "state_dir", lambda: tmp_path / "state")
+        monkeypatch.setattr(ml_state, "state_dir", lambda: tmp_path / "state")
         with pytest.raises(ValueError, match="cannot start with '-'"):
-            hook.write_setting("image", value)
+            ml_settings.write_setting("image", value)
 
     def test_default_image_has_version_marker(self):
-        source = HOOK_PATH.read_text(encoding="utf-8")
+        source = Path(ml_settings.__file__).read_text(encoding="utf-8")
         assert "x-release-please-version" in source
 
     def test_resolve_image_defaults(self, hook, monkeypatch):
-        monkeypatch.setattr(hook, "read_setting", lambda key: None)
-        assert hook.resolve_image() == hook.DEFAULT_IMAGE
+        monkeypatch.setattr(ml_settings, "read_setting", lambda key: None)
+        assert ml_settings.resolve_image() == ml_settings.DEFAULT_IMAGE
 
     def test_resolve_image_uses_setting(self, hook, monkeypatch):
-        monkeypatch.setattr(hook, "read_setting", lambda key: "local/build:dev")
-        assert hook.resolve_image() == "local/build:dev"
+        monkeypatch.setattr(ml_settings, "read_setting", lambda key: "local/build:dev")
+        assert ml_settings.resolve_image() == "local/build:dev"
 
     def test_image_in_settings_keys(self, hook):
-        assert "image" in hook.SETTINGS_KEYS
+        assert "image" in ml_settings.SETTINGS_KEYS
 
     def test_settings_keys_order(self, hook):
-        assert hook.SETTINGS_KEYS == ("image", "search_ceiling")
+        assert ml_settings.SETTINGS_KEYS == ("image", "search_ceiling")
 
 
 class TestDockerArgv:
     """build_docker_argv() produces the exact sandboxed `docker run` for one ephemeral container."""
 
     def test_exact_argv(self, hook, monkeypatch, tmp_path):
-        monkeypatch.setattr(hook, "read_setting", lambda key: None)
-        scripts = hook.scripts_dir()
-        assert hook.build_docker_argv(tmp_path, ["a.py", "b.sh"], name="multilint-1-ab") == [
+        monkeypatch.setattr(ml_settings, "read_setting", lambda key: None)
+        scripts = ml_container.scripts_dir()
+        assert ml_container.build_docker_argv(tmp_path, ["a.py", "b.sh"], name="multilint-1-ab") == [
             "docker",
             "run",
             "--rm",
@@ -136,9 +142,9 @@ class TestDockerArgv:
             "bash",
             "--user",
             f"{os.getuid()}:{os.getgid()}",
-            hook.DEFAULT_IMAGE,
+            ml_settings.DEFAULT_IMAGE,
             "-c",
-            hook.container_program(),
+            ml_container.container_program(),
             "_",
             "a.py",
             "b.sh",
@@ -146,27 +152,27 @@ class TestDockerArgv:
 
     def test_mount_spec_quotes_csv_special_characters(self, hook):
         """docker parses --mount as CSV: an unquoted ',' in a path would split it into bogus keys."""
-        assert hook.bind_mount("/a/b", "/t") == "type=bind,source=/a/b,target=/t,readonly"
-        assert hook.bind_mount("/a,b", "/t") == 'type=bind,"source=/a,b",target=/t,readonly'
-        assert hook.bind_mount('/a"b', "/t") == 'type=bind,"source=/a""b",target=/t,readonly'
+        assert ml_container.bind_mount("/a/b", "/t") == "type=bind,source=/a/b,target=/t,readonly"
+        assert ml_container.bind_mount("/a,b", "/t") == 'type=bind,"source=/a,b",target=/t,readonly'
+        assert ml_container.bind_mount('/a"b', "/t") == 'type=bind,"source=/a""b",target=/t,readonly'
 
     def test_each_container_gets_a_unique_name(self, hook):
-        assert hook.container_name() != hook.container_name()
-        assert hook.container_name().startswith("multilint-")
+        assert ml_container.container_name() != ml_container.container_name()
+        assert ml_container.container_name().startswith("multilint-")
 
     def test_scripts_dir_holds_lint_sh(self, hook):
-        assert (hook.scripts_dir() / "lint.sh").is_file()
+        assert (ml_container.scripts_dir() / "lint.sh").is_file()
 
     def test_explicit_image_wins(self, hook, monkeypatch, tmp_path):
-        monkeypatch.setattr(hook, "read_setting", lambda key: "from/setting:1")
-        assert "myimg:v1" in hook.build_docker_argv(tmp_path, ["a.py"], "myimg:v1")
-        assert "from/setting:1" not in hook.build_docker_argv(tmp_path, ["a.py"], "myimg:v1")
+        monkeypatch.setattr(ml_settings, "read_setting", lambda key: "from/setting:1")
+        assert "myimg:v1" in ml_container.build_docker_argv(tmp_path, ["a.py"], "myimg:v1")
+        assert "from/setting:1" not in ml_container.build_docker_argv(tmp_path, ["a.py"], "myimg:v1")
 
     def test_image_setting_overrides_default(self, hook, monkeypatch, tmp_path):
-        monkeypatch.setattr(hook, "read_setting", lambda key: "local/multilint:dev" if key == "image" else None)
-        argv = hook.build_docker_argv(tmp_path, ["a.py"])
+        monkeypatch.setattr(ml_settings, "read_setting", lambda key: "local/multilint:dev" if key == "image" else None)
+        argv = ml_container.build_docker_argv(tmp_path, ["a.py"])
         assert "local/multilint:dev" in argv
-        assert hook.DEFAULT_IMAGE not in argv
+        assert ml_settings.DEFAULT_IMAGE not in argv
 
 
 class TestRunCli:
@@ -179,7 +185,7 @@ class TestRunCli:
             calls.append((scope_root, relative_paths))
             return [("a.md", {"checks": {"markdownlint": {"status": "failed"}}}, "MD009 a.md:1\n")]
 
-        monkeypatch.setattr(hook, "run_lint", fake_run_lint)
+        monkeypatch.setattr(ml_container, "run_lint", fake_run_lint)
         assert hook.run_cli(str(tmp_path), "a.md") == 0
         out, err = capsys.readouterr()
         assert json.loads(out) == {"checks": {"markdownlint": {"status": "failed"}}}
@@ -201,9 +207,9 @@ class TestRunCli:
 
     def test_unavailable_exits_1_with_the_reason(self, hook, monkeypatch, capsys, tmp_path):
         def unavailable(_root, _paths):
-            raise hook.LintUnavailable("docker not found on PATH")
+            raise ml_container.LintUnavailable("docker not found on PATH")
 
-        monkeypatch.setattr(hook, "run_lint", unavailable)
+        monkeypatch.setattr(ml_container, "run_lint", unavailable)
         assert hook.run_cli(str(tmp_path), "a.md") == 1
         out, err = capsys.readouterr()
         assert out == ""
@@ -241,13 +247,15 @@ class TestResultParsing:
         }
 
     def test_splits_multiple_documents(self, hook):
-        stdout = "".join(f"{hook.FILE_MARKER}{name}\n{json.dumps(self._document())}\n" for name in ("a.py", "b.sh"))
-        assert sorted(hook.split_stream(stdout)) == ["a.py", "b.sh"]
+        stdout = "".join(
+            f"{ml_container.FILE_MARKER}{name}\n{json.dumps(self._document())}\n" for name in ("a.py", "b.sh")
+        )
+        assert sorted(ml_container.split_stream(stdout)) == ["a.py", "b.sh"]
 
     def test_pairs_detail_with_its_file(self, hook):
         """stderr detail must be attributed to the right file, not concatenated."""
-        stderr = f"{hook.FILE_MARKER}a.py\n  ✗ flake8\n{hook.FILE_MARKER}b.sh\n  ✗ shellcheck\n"
-        sections = hook.split_stream(stderr)
+        stderr = f"{ml_container.FILE_MARKER}a.py\n  ✗ flake8\n{ml_container.FILE_MARKER}b.sh\n  ✗ shellcheck\n"
+        sections = ml_container.split_stream(stderr)
         assert "flake8" in sections["a.py"]
         assert "shellcheck" in sections["b.sh"]
         assert "shellcheck" not in sections["a.py"]
@@ -255,35 +263,35 @@ class TestResultParsing:
     def test_unparsable_document_is_unavailable_not_guessed(self, hook, monkeypatch, tmp_path):
         """A malformed result is never reported as a finding; it makes the file unverified."""
         (tmp_path / "lint.sh").touch()
-        monkeypatch.setattr(hook.shutil, "which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr(ml_container.shutil, "which", lambda _name: "/usr/bin/docker")
 
         class _Proc:
-            stdout = f"{hook.FILE_MARKER}a.py\nthis is not json\n"
+            stdout = f"{ml_container.FILE_MARKER}a.py\nthis is not json\n"
             stderr = ""
             returncode = 1
 
-        monkeypatch.setattr(hook.subprocess, "run", lambda *_a, **_k: _Proc())
-        with pytest.raises(hook.LintUnavailable, match="no readable result"):
-            hook.run_lint(tmp_path, ["a.py"])
+        monkeypatch.setattr(ml_container.subprocess, "run", lambda *_a, **_k: _Proc())
+        with pytest.raises(ml_container.LintUnavailable, match="no readable result"):
+            ml_container.run_lint(tmp_path, ["a.py"])
 
     def test_missing_lint_sh_is_unavailable(self, hook, monkeypatch, tmp_path):
-        monkeypatch.setattr(hook.shutil, "which", lambda _name: "/usr/bin/docker")
-        monkeypatch.setattr(hook, "scripts_dir", lambda: tmp_path)
-        with pytest.raises(hook.LintUnavailable, match="lint.sh not found"):
-            hook.run_lint(Path("/p"), ["a.py"])
+        monkeypatch.setattr(ml_container.shutil, "which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr(ml_container, "scripts_dir", lambda: tmp_path)
+        with pytest.raises(ml_container.LintUnavailable, match="lint.sh not found"):
+            ml_container.run_lint(Path("/p"), ["a.py"])
 
     def test_docker_error_is_named_in_the_notice(self, hook, monkeypatch, tmp_path):
         """A daemon or pull failure prints before any marker; that line is the reason, not lint.sh's output."""
-        monkeypatch.setattr(hook.shutil, "which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr(ml_container.shutil, "which", lambda _name: "/usr/bin/docker")
 
         class _Proc:
             stdout = ""
             stderr = "Unable to find image 'x:1' locally\ndocker: Error response from daemon: pull access denied.\n"
             returncode = 125
 
-        monkeypatch.setattr(hook.subprocess, "run", lambda *_a, **_k: _Proc())
-        with pytest.raises(hook.LintUnavailable) as caught:
-            hook.run_lint(tmp_path, ["a.py"])
+        monkeypatch.setattr(ml_container.subprocess, "run", lambda *_a, **_k: _Proc())
+        with pytest.raises(ml_container.LintUnavailable) as caught:
+            ml_container.run_lint(tmp_path, ["a.py"])
         assert str(caught.value) == (
             "the ephemeral container produced no readable result "
             "(exit status 125: docker: Error response from daemon: pull access denied.)"
@@ -291,20 +299,20 @@ class TestResultParsing:
 
     def test_missing_docker_is_unavailable(self, hook, monkeypatch):
         """When docker is missing, LintUnavailable is raised."""
-        monkeypatch.setattr(hook.shutil, "which", lambda _name: None)
-        with pytest.raises(hook.LintUnavailable, match="docker not found"):
-            hook.run_lint(Path("/p"), ["a.py"])
+        monkeypatch.setattr(ml_container.shutil, "which", lambda _name: None)
+        with pytest.raises(ml_container.LintUnavailable, match="docker not found"):
+            ml_container.run_lint(Path("/p"), ["a.py"])
 
     def test_subprocess_failure_is_unavailable(self, hook, monkeypatch, tmp_path):
         (tmp_path / "lint.sh").touch()
-        monkeypatch.setattr(hook.shutil, "which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr(ml_container.shutil, "which", lambda _name: "/usr/bin/docker")
 
         def _boom(*_args, **_kwargs):
             raise OSError("no such binary")
 
-        monkeypatch.setattr(hook.subprocess, "run", _boom)
-        with pytest.raises(hook.LintUnavailable, match="could not be started"):
-            hook.run_lint(tmp_path, ["a.py"])
+        monkeypatch.setattr(ml_container.subprocess, "run", _boom)
+        with pytest.raises(ml_container.LintUnavailable, match="could not be started"):
+            ml_container.run_lint(tmp_path, ["a.py"])
 
 
 class TestDockerRun:
@@ -319,37 +327,37 @@ class TestDockerRun:
             calls.append((args[0], kwargs))
 
             class _Proc:
-                stdout = f'{hook.FILE_MARKER}a.py\n{{"checks": {{}}}}\n'
+                stdout = f'{ml_container.FILE_MARKER}a.py\n{{"checks": {{}}}}\n'
                 stderr = ""
                 returncode = 0
 
             return _Proc()
 
-        monkeypatch.setattr(hook.subprocess, "run", mock_run)
-        monkeypatch.setattr(hook.shutil, "which", lambda _: "/usr/bin/docker")
+        monkeypatch.setattr(ml_container.subprocess, "run", mock_run)
+        monkeypatch.setattr(ml_container.shutil, "which", lambda _: "/usr/bin/docker")
 
-        assert hook.run_lint(tmp_path, ["a.py"]) == [("a.py", {"checks": {}}, "")]
+        assert ml_container.run_lint(tmp_path, ["a.py"]) == [("a.py", {"checks": {}}, "")]
 
         argv = calls[0][0]
-        assert argv == hook.build_docker_argv(tmp_path, ["a.py"], name=argv[argv.index("--name") + 1])
-        assert calls[0][1]["timeout"] == hook.RUN_TIMEOUT_SECONDS
+        assert argv == ml_container.build_docker_argv(tmp_path, ["a.py"], name=argv[argv.index("--name") + 1])
+        assert calls[0][1]["timeout"] == ml_container.RUN_TIMEOUT_SECONDS
 
     def test_run_lint_handles_timeout(self, hook, monkeypatch, tmp_path):
         """A timeout makes the file unverified, never a silent pass."""
         (tmp_path / "lint.sh").touch()
-        monkeypatch.setattr(hook.shutil, "which", lambda _: "/usr/bin/docker")
+        monkeypatch.setattr(ml_container.shutil, "which", lambda _: "/usr/bin/docker")
 
         def mock_run(*_args, **_kwargs):
             raise subprocess.TimeoutExpired("docker", 300)
 
-        monkeypatch.setattr(hook.subprocess, "run", mock_run)
+        monkeypatch.setattr(ml_container.subprocess, "run", mock_run)
 
-        with pytest.raises(hook.LintUnavailable, match="ephemeral container did not finish within 300 s"):
-            hook.run_lint(tmp_path, ["a.py"])
+        with pytest.raises(ml_container.LintUnavailable, match="ephemeral container did not finish within 300 s"):
+            ml_container.run_lint(tmp_path, ["a.py"])
 
     def test_timed_out_container_is_removed_by_name(self, hook, monkeypatch, tmp_path):
         """Killing the docker client leaves the container running, so the hook removes it."""
-        monkeypatch.setattr(hook.shutil, "which", lambda _: "/usr/bin/docker")
+        monkeypatch.setattr(ml_container.shutil, "which", lambda _: "/usr/bin/docker")
         calls = []
 
         def mock_run(argv, **_kwargs):
@@ -357,9 +365,9 @@ class TestDockerRun:
             if argv[1] == "run":
                 raise subprocess.TimeoutExpired("docker", 300)
 
-        monkeypatch.setattr(hook.subprocess, "run", mock_run)
-        with pytest.raises(hook.LintUnavailable):
-            hook.run_lint(tmp_path, ["a.py"])
+        monkeypatch.setattr(ml_container.subprocess, "run", mock_run)
+        with pytest.raises(ml_container.LintUnavailable):
+            ml_container.run_lint(tmp_path, ["a.py"])
         name = calls[0][calls[0].index("--name") + 1]
         assert calls[1] == ["docker", "rm", "-f", name]
 
@@ -372,7 +380,7 @@ class TestSkippedChecksAreSurfaced:
         return {"summary": {"checks_skipped": skipped}, "checks": {}, "return_code": 0}
 
     def test_reports_skipped_checks(self, hook):
-        assert hook.skipped_checks(self._document(["markdownlint", "prettier"])) == [
+        assert ml_results.skipped_checks(self._document(["markdownlint", "prettier"])) == [
             "markdownlint",
             "prettier",
         ]
@@ -382,17 +390,17 @@ class TestSkippedChecksAreSurfaced:
         target can never satisfy that, so the skip fired after every edit and carried no
         information. lint.sh now falls back to --no-git, so a reported gitleaks skip means the
         check genuinely did not run and the user needs to hear it."""
-        assert hook.skipped_checks(self._document(["gitleaks"])) == ["gitleaks"]
-        assert hook.skipped_checks(self._document(["gitleaks", "mypy"])) == ["gitleaks", "mypy"]
+        assert ml_results.skipped_checks(self._document(["gitleaks"])) == ["gitleaks"]
+        assert ml_results.skipped_checks(self._document(["gitleaks", "mypy"])) == ["gitleaks", "mypy"]
 
     def test_nothing_is_structurally_suppressed(self, hook):
-        assert hook.STRUCTURALLY_SKIPPED == frozenset()
+        assert ml_results.STRUCTURALLY_SKIPPED == frozenset()
 
     def test_tolerates_a_missing_summary(self, hook):
-        assert hook.skipped_checks({"checks": {}}) == []
+        assert ml_results.skipped_checks({"checks": {}}) == []
 
     def test_tolerates_a_malformed_summary(self, hook):
-        assert hook.skipped_checks({"summary": {"checks_skipped": "mypy"}}) == []
+        assert ml_results.skipped_checks({"summary": {"checks_skipped": "mypy"}}) == []
 
 
 class TestFailingChecks:
@@ -404,14 +412,14 @@ class TestFailingChecks:
                 "mypy": {"status": "skipped", "failed": 0},
             }
         }
-        assert hook.failing_checks(document) == ["flake8: 2 failure(s)"]
+        assert ml_results.failing_checks(document) == ["flake8: 2 failure(s)"]
 
     def test_counts_failures_even_without_a_status(self, hook):
         """Tolerates an older document shape rather than reporting a failure as clean."""
-        assert hook.failing_checks({"checks": {"pylint": {"failed": 1}}}) == ["pylint: 1 failure(s)"]
+        assert ml_results.failing_checks({"checks": {"pylint": {"failed": 1}}}) == ["pylint: 1 failure(s)"]
 
     def test_empty_document_reports_nothing(self, hook):
-        assert hook.failing_checks({}) == []
+        assert ml_results.failing_checks({}) == []
 
 
 class TestTreeWalkIsGone:
@@ -449,11 +457,11 @@ class TestGitRootIsBoundedAtHome:
     """
 
     def test_finds_the_repository_containing_the_file(self, hook, tmp_path, monkeypatch):
-        _set_ceiling(monkeypatch, hook, tmp_path)
+        _set_ceiling(monkeypatch, tmp_path)
         (tmp_path / "repo" / ".git").mkdir(parents=True)
         deep = tmp_path / "repo" / "src" / "pkg"
         deep.mkdir(parents=True)
-        assert hook.find_git_root(deep) == (tmp_path / "repo").resolve()
+        assert ml_repo.find_git_root(deep) == (tmp_path / "repo").resolve()
 
     def test_stops_at_the_ceiling_instead_of_climbing_to_root(self, hook, tmp_path, monkeypatch):
         """A .git above the ceiling must not be claimed, even though it exists."""
@@ -461,8 +469,8 @@ class TestGitRootIsBoundedAtHome:
         ceiling = tmp_path / "home"
         inner = ceiling / "loose"
         inner.mkdir(parents=True)
-        _set_ceiling(monkeypatch, hook, ceiling)
-        assert hook.find_git_root(inner) is None
+        _set_ceiling(monkeypatch, ceiling)
+        assert ml_repo.find_git_root(inner) is None
 
     def test_path_outside_the_ceiling_is_not_searched(self, hook, tmp_path, monkeypatch):
         """This is the /etc case: nothing above such a path is ours to claim."""
@@ -470,17 +478,17 @@ class TestGitRootIsBoundedAtHome:
         outside.mkdir(parents=True)
         (outside / ".git").mkdir()
         (tmp_path / "home").mkdir()
-        _set_ceiling(monkeypatch, hook, tmp_path / "home")
-        assert hook.find_git_root(outside) is None
+        _set_ceiling(monkeypatch, tmp_path / "home")
+        assert ml_repo.find_git_root(outside) is None
 
     def test_ceiling_itself_may_be_the_repository(self, hook, tmp_path, monkeypatch):
-        _set_ceiling(monkeypatch, hook, tmp_path)
+        _set_ceiling(monkeypatch, tmp_path)
         (tmp_path / ".git").mkdir()
-        assert hook.find_git_root(tmp_path) == tmp_path.resolve()
+        assert ml_repo.find_git_root(tmp_path) == tmp_path.resolve()
 
     def test_defaults_to_home_when_unset(self, hook, monkeypatch):
-        monkeypatch.setattr(hook, "read_setting", lambda key: None)
-        assert hook.search_ceiling() == Path.home()
+        monkeypatch.setattr(ml_settings, "read_setting", lambda key: None)
+        assert ml_repo.search_ceiling() == Path.home()
 
 
 class TestStateSchema:
@@ -503,7 +511,7 @@ class TestStateSchema:
     def test_adds_columns_to_an_existing_database(self, hook, tmp_path, monkeypatch):
         self._legacy_db(tmp_path)
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-        connection = hook.open_state()
+        connection = ml_state.open_state()
         assert connection is not None
         try:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(seen)")}
@@ -515,7 +523,7 @@ class TestStateSchema:
         """A migration that loses history is a worse outcome than no migration."""
         self._legacy_db(tmp_path)
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-        connection = hook.open_state()
+        connection = ml_state.open_state()
         try:
             row = connection.execute("SELECT digest FROM seen WHERE path = '/old/file.py'").fetchone()
         finally:
@@ -526,15 +534,15 @@ class TestStateSchema:
         """Two sessions run this hook concurrently; the second must not fail on duplicate columns."""
         self._legacy_db(tmp_path)
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-        first = hook.open_state()
+        first = ml_state.open_state()
         first.close()
-        second = hook.open_state()
+        second = ml_state.open_state()
         assert second is not None
         second.close()
 
     def test_creates_the_folder_cache_table(self, hook, tmp_path, monkeypatch):
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "fresh"))
-        connection = hook.open_state()
+        connection = ml_state.open_state()
         try:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(folders)")}
         finally:
@@ -552,8 +560,8 @@ class TestGitRootCache:
     @pytest.fixture
     def state(self, hook, tmp_path, monkeypatch):
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
-        _set_ceiling(monkeypatch, hook, tmp_path)
-        connection = hook.open_state()
+        _set_ceiling(monkeypatch, tmp_path)
+        connection = ml_state.open_state()
         yield connection
         connection.close()
 
@@ -561,7 +569,7 @@ class TestGitRootCache:
         (tmp_path / "repo" / ".git").mkdir(parents=True)
         folder = tmp_path / "repo" / "src"
         folder.mkdir()
-        root, from_cache = hook.cached_git_root(state, folder)
+        root, from_cache = ml_repo.cached_git_root(state, folder)
         assert root == (tmp_path / "repo").resolve()
         assert from_cache is False
 
@@ -569,8 +577,8 @@ class TestGitRootCache:
         (tmp_path / "repo" / ".git").mkdir(parents=True)
         folder = tmp_path / "repo" / "src"
         folder.mkdir()
-        hook.cached_git_root(state, folder)
-        root, from_cache = hook.cached_git_root(state, folder)
+        ml_repo.cached_git_root(state, folder)
+        root, from_cache = ml_repo.cached_git_root(state, folder)
         assert root == (tmp_path / "repo").resolve()
         assert from_cache is True
 
@@ -580,9 +588,9 @@ class TestGitRootCache:
         git_dir.mkdir(parents=True)
         folder = tmp_path / "repo" / "src"
         folder.mkdir()
-        hook.cached_git_root(state, folder)
+        ml_repo.cached_git_root(state, folder)
         git_dir.rmdir()
-        root, from_cache = hook.cached_git_root(state, folder)
+        root, from_cache = ml_repo.cached_git_root(state, folder)
         assert root is None
         assert from_cache is False
 
@@ -590,31 +598,31 @@ class TestGitRootCache:
         """ "No repository" is worth caching too, otherwise every edit outside a repo re-walks."""
         folder = tmp_path / "loose"
         folder.mkdir()
-        assert hook.cached_git_root(state, folder) == (None, False)
-        assert hook.cached_git_root(state, folder) == (None, True)
+        assert ml_repo.cached_git_root(state, folder) == (None, False)
+        assert ml_repo.cached_git_root(state, folder) == (None, True)
 
     def test_cached_absence_is_revisited_when_a_repository_appears(self, hook, state, tmp_path):
         """git init after a cached miss. A cached 'no' must not outlive the fact."""
         folder = tmp_path / "loose"
         folder.mkdir()
-        hook.cached_git_root(state, folder)
+        ml_repo.cached_git_root(state, folder)
         (folder / ".git").mkdir()
-        root, from_cache = hook.cached_git_root(state, folder)
+        root, from_cache = ml_repo.cached_git_root(state, folder)
         assert root == folder.resolve()
         assert from_cache is False
 
     def test_timestamps_are_recorded(self, hook, state, tmp_path):
         folder = tmp_path / "loose"
         folder.mkdir()
-        hook.cached_git_root(state, folder)
+        ml_repo.cached_git_root(state, folder)
         row = state.execute("SELECT resolved_at, last_used_at FROM folders").fetchone()
         assert row[0] and row[1]
 
     def test_works_without_a_database(self, hook, tmp_path, monkeypatch):
         """No database is a degraded mode, not a failure mode."""
-        _set_ceiling(monkeypatch, hook, tmp_path)
+        _set_ceiling(monkeypatch, tmp_path)
         (tmp_path / "repo" / ".git").mkdir(parents=True)
-        root, from_cache = hook.cached_git_root(None, tmp_path / "repo")
+        root, from_cache = ml_repo.cached_git_root(None, tmp_path / "repo")
         assert root == (tmp_path / "repo").resolve()
         assert from_cache is False
 
@@ -625,65 +633,65 @@ class TestChangeRecording:
     @pytest.fixture
     def state(self, hook, tmp_path, monkeypatch):
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
-        connection = hook.open_state()
+        connection = ml_state.open_state()
         yield connection
         connection.close()
 
     def test_first_sight_of_a_file_is_a_change(self, hook, state, tmp_path):
         target = tmp_path / "a.py"
         target.write_text("x = 1\n", encoding="utf-8")
-        assert hook.record_and_check(state, target, None) is True
+        assert ml_state.record_and_check(state, target, None) is True
 
     def test_identical_rewrite_is_not_a_change(self, hook, state, tmp_path):
         target = tmp_path / "a.py"
         target.write_text("x = 1\n", encoding="utf-8")
-        hook.record_and_check(state, target, None)
+        ml_state.record_and_check(state, target, None)
         target.write_text("x = 1\n", encoding="utf-8")
-        assert hook.record_and_check(state, target, None) is False
+        assert ml_state.record_and_check(state, target, None) is False
 
     def test_different_content_is_a_change(self, hook, state, tmp_path):
         target = tmp_path / "a.py"
         target.write_text("x = 1\n", encoding="utf-8")
-        hook.record_and_check(state, target, None)
+        ml_state.record_and_check(state, target, None)
         target.write_text("x = 2\n", encoding="utf-8")
-        assert hook.record_and_check(state, target, None) is True
+        assert ml_state.record_and_check(state, target, None) is True
 
     def test_in_git_is_recorded_with_the_root(self, hook, state, tmp_path):
         target = tmp_path / "a.py"
         target.write_text("x = 1\n", encoding="utf-8")
-        hook.record_and_check(state, target, tmp_path)
+        ml_state.record_and_check(state, target, tmp_path)
         row = state.execute("SELECT in_git, git_root FROM seen WHERE path = ?", (str(target),)).fetchone()
         assert row == (1, str(tmp_path))
 
     def test_absence_of_a_repository_is_recorded_as_such(self, hook, state, tmp_path):
         target = tmp_path / "a.py"
         target.write_text("x = 1\n", encoding="utf-8")
-        hook.record_and_check(state, target, None)
+        ml_state.record_and_check(state, target, None)
         row = state.execute("SELECT in_git, git_root FROM seen WHERE path = ?", (str(target),)).fetchone()
         assert row == (0, None)
 
     def test_first_seen_is_not_overwritten_by_later_writes(self, hook, state, tmp_path):
         target = tmp_path / "a.py"
         target.write_text("x = 1\n", encoding="utf-8")
-        hook.record_and_check(state, target, None)
+        ml_state.record_and_check(state, target, None)
         first = state.execute("SELECT first_seen_at FROM seen").fetchone()[0]
         target.write_text("x = 2\n", encoding="utf-8")
-        hook.record_and_check(state, target, None)
+        ml_state.record_and_check(state, target, None)
         assert state.execute("SELECT first_seen_at FROM seen").fetchone()[0] == first
 
     def test_without_a_database_every_write_counts_as_changed(self, hook, tmp_path):
         """Linting twice wastes time; skipping a real change reports a false clean."""
         target = tmp_path / "a.py"
         target.write_text("x = 1\n", encoding="utf-8")
-        assert hook.record_and_check(None, target, None) is True
+        assert ml_state.record_and_check(None, target, None) is True
 
     def test_unreadable_file_is_not_a_change(self, hook, state, tmp_path):
-        assert hook.record_and_check(state, tmp_path / "missing.py", None) is False
+        assert ml_state.record_and_check(state, tmp_path / "missing.py", None) is False
 
 
 class TestTimestampFormat:
     def test_is_iso8601_utc_to_the_second(self, hook):
-        stamp = hook.now_stamp()
+        stamp = ml_state.now_stamp()
         parsed = datetime.fromisoformat(stamp)
         assert parsed.tzinfo is not None
         assert parsed.microsecond == 0
@@ -692,7 +700,7 @@ class TestTimestampFormat:
 class TestFailingLines:
     def test_keeps_only_marked_lines(self, hook):
         output = "  ✓ flake8\n  ✗ black\n  ⚠ pylint: 3 failures\n  📄 file.sh\n"
-        assert hook.failing_lines(output) == ["  ✗ black", "  ⚠ pylint: 3 failures"]
+        assert ml_results.failing_lines(output) == ["  ✗ black", "  ⚠ pylint: 3 failures"]
 
 
 class TestHookSettings:
@@ -791,8 +799,8 @@ class TestHookSettings:
         """A relative XDG_STATE_HOME is invalid per the XDG spec; it used to crash the hook."""
         monkeypatch.setenv("XDG_STATE_HOME", "relative/state")
         monkeypatch.setenv("HOME", str(tmp_path))
-        assert hook.state_dir() == tmp_path / ".local" / "state" / "multilint"
-        assert hook.search_ceiling() == Path.home()
+        assert ml_state.state_dir() == tmp_path / ".local" / "state" / "multilint"
+        assert ml_repo.search_ceiling() == Path.home()
 
     def test_unreadable_database_warns_instead_of_failing_silently(self, tmp_path):
         """A corrupt (or locked) db falls back to the default but says so; absence stays silent."""
@@ -811,7 +819,7 @@ class TestHookSettings:
     def test_resolvers_default_when_no_row_exists(self, hook, tmp_path, monkeypatch):
         """Absent db/table/row all resolve to the built-in default, not an error."""
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-        assert hook.search_ceiling() == Path.home()
+        assert ml_repo.search_ceiling() == Path.home()
 
 
 class TestNoEnvironmentInfluence:
@@ -825,17 +833,17 @@ class TestNoEnvironmentInfluence:
         monkeypatch.delenv("MULTILINT_IMAGE", raising=False)
         monkeypatch.delenv("MULTILINT_SEARCH_CEILING", raising=False)
         monkeypatch.delenv("MULTILINT_STATE_DIR", raising=False)
-        baseline_ceiling = hook.search_ceiling()
-        baseline_state_dir = hook.state_dir()
-        baseline_image = hook.resolve_image()
+        baseline_ceiling = ml_repo.search_ceiling()
+        baseline_state_dir = ml_state.state_dir()
+        baseline_image = ml_settings.resolve_image()
 
         monkeypatch.setenv("MULTILINT_IMAGE", "local/other:dev")
         monkeypatch.setenv("MULTILINT_SEARCH_CEILING", str(tmp_path / "elsewhere"))
         monkeypatch.setenv("MULTILINT_STATE_DIR", str(tmp_path / "elsewhere" / "state"))
 
-        assert hook.search_ceiling() == baseline_ceiling
-        assert hook.state_dir() == baseline_state_dir
-        assert hook.resolve_image() == baseline_image
+        assert ml_repo.search_ceiling() == baseline_ceiling
+        assert ml_state.state_dir() == baseline_state_dir
+        assert ml_settings.resolve_image() == baseline_image
 
 
 class TestFindingsNotice:
@@ -852,9 +860,11 @@ class TestFindingsNotice:
             },
         }
         results = [("a.py", document, "")]
-        findings, skipped, warnings, failed = hook.summarize_results(results)
-        names = hook.finding_blocks(document)[0]
-        (notice,) = hook.build_notices("a.py", findings, skipped, warnings, failed, names, hook.violated_rules(results))
+        findings, skipped, warnings, failed = ml_report.summarize_results(results)
+        names = ml_results.finding_blocks(document)[0]
+        (notice,) = ml_report.build_notices(
+            "a.py", findings, skipped, warnings, failed, names, ml_results.violated_rules(results)
+        )
         assert notice == (
             "multilint: a.py failed flake8\n\n"
             "flake8 — fix the code (policy: checks.flake8.args)\n"
@@ -872,9 +882,9 @@ class TestFindingsNotice:
             },
         }
         results = [("a.py", document, "")]
-        findings, skipped, warnings, failed = hook.summarize_results(results)
-        reasons = hook.skip_reasons(results)
-        (notice,) = hook.build_notices("a.py", findings, skipped, warnings, failed, reasons=reasons)
+        findings, skipped, warnings, failed = ml_report.summarize_results(results)
+        reasons = ml_results.skip_reasons(results)
+        (notice,) = ml_report.build_notices("a.py", findings, skipped, warnings, failed, reasons=reasons)
         assert notice == (
             "multilint could not run these checks, so a.py is unverified for them:\n"
             "  gitleaks: not installed on PATH\n"
@@ -907,9 +917,9 @@ def _drive_hook(hook, monkeypatch, tmp_path, payload, run_lint_result=()):
             raise run_lint_result
         return list(run_lint_result)
 
-    monkeypatch.setattr(hook, "state_dir", lambda: tmp_path / "state")
-    _set_ceiling(monkeypatch, hook, tmp_path)
-    monkeypatch.setattr(hook, "run_lint", stub_run_lint)
+    monkeypatch.setattr(ml_state, "state_dir", lambda: tmp_path / "state")
+    _set_ceiling(monkeypatch, tmp_path)
+    monkeypatch.setattr(ml_container, "run_lint", stub_run_lint)
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     stdout = io.StringIO()
     monkeypatch.setattr("sys.stdout", stdout)
@@ -926,7 +936,7 @@ class TestEveryLintableTypeReachesLint:
 
     @pytest.mark.parametrize("tracked", (False, True), ids=("untracked", "tracked"))
     @pytest.mark.parametrize("tool_name", ("Write", "Edit"))
-    @pytest.mark.parametrize("suffix", sorted(_load_module().LINTABLE_SUFFIXES))
+    @pytest.mark.parametrize("suffix", sorted(ml_repo.LINTABLE_SUFFIXES))
     def test_reaches_run_lint(self, hook, tmp_path, monkeypatch, suffix, tool_name, tracked):
         repo = _git_repo(tmp_path)
         relative = f"src/sample{suffix}"
@@ -993,7 +1003,7 @@ class TestEveryLintableTypeReachesLint:
         payload = {"tool_name": "Write", "cwd": str(repo), "tool_input": {"file_path": str(repo / "sample.py")}}
 
         code, _calls, out = _drive_hook(
-            hook, monkeypatch, tmp_path, payload, hook.LintUnavailable("docker not found on PATH")
+            hook, monkeypatch, tmp_path, payload, ml_container.LintUnavailable("docker not found on PATH")
         )
 
         output = json.loads(out)
@@ -1012,7 +1022,7 @@ class TestEveryLintableTypeReachesLint:
         (repo / "sample.py").write_text("x = 1\n", encoding="utf-8")
         payload = {"tool_name": "Write", "cwd": str(repo), "tool_input": {"file_path": str(repo / "sample.py")}}
 
-        _drive_hook(hook, monkeypatch, tmp_path, payload, hook.LintUnavailable("docker not found on PATH"))
+        _drive_hook(hook, monkeypatch, tmp_path, payload, ml_container.LintUnavailable("docker not found on PATH"))
         _code, calls, _out = _drive_hook(hook, monkeypatch, tmp_path, payload)
         assert len(calls) == 1, "an identical save after a failed lint was treated as unchanged"
         _code, calls, _out = _drive_hook(hook, monkeypatch, tmp_path, payload)
@@ -1089,14 +1099,14 @@ class TestRepeatedVerdict:
         target = Path(payload["tool_input"]["file_path"])
         _drive_hook(hook, monkeypatch, tmp_path, payload, [("sample.py", self.FAILING, "")])
         target.write_text("x = 1\n", encoding="utf-8")
-        monkeypatch.setattr(hook, "state_dir", lambda: tmp_path / "state")
-        state = hook.open_state()
+        monkeypatch.setattr(ml_state, "state_dir", lambda: tmp_path / "state")
+        state = ml_state.open_state()
         try:
-            assert hook.record_and_check(state, target.resolve(), None) is True
+            assert ml_state.record_and_check(state, target.resolve(), None) is True
         finally:
             state.close()
 
-        assert hook.stored_report(target.resolve()) is None
+        assert ml_state.stored_report(target.resolve()) is None
 
     def test_user_message_carries_every_notice(self, hook, tmp_path, monkeypatch, payload):
         document = dict(self.FAILING, summary={"rules_violated": ["F401"], "checks_skipped": ["gitleaks"]})
@@ -1123,7 +1133,7 @@ class TestLintableTypesMatchLintSh:
         calls = re.findall(r"< <\(ml_files ((?:'[^']+' )+)--", text)
         patterns = {suffix for call in calls for suffix in re.findall(r"'\*(\.\w+)'", call)}
         assert calls, "no ml_files calls found in lint.sh; update this guard with the file selection"
-        assert patterns == hook.LINTABLE_SUFFIXES
+        assert patterns == ml_repo.LINTABLE_SUFFIXES
 
 
 class TestHookWiring:
