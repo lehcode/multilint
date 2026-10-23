@@ -68,8 +68,8 @@ def argv_dir(tmp_path):
     return record
 
 
-def lint(proj, argv_dir, config=None):
-    """Run lint.sh from the project root, as both plugins do, and return the JSON document."""
+def run_lint(proj, argv_dir, config=None, extra=()):
+    """Run lint.sh from the project root, as both plugins do, with the shims first on PATH."""
     if config is not None:
         (proj / ".multilint.json").write_text(json.dumps(config), encoding="utf-8")
     env = {
@@ -77,9 +77,12 @@ def lint(proj, argv_dir, config=None):
         "PATH": f"{argv_dir.parent / 'shim-bin'}:{os.environ['PATH']}",
         "ML_ARGV_DIR": str(argv_dir),
     }
-    result = subprocess.run(
-        ["bash", str(LINT_SH), str(proj), "--format", "json"], capture_output=True, text=True, env=env, cwd=proj
-    )
+    return subprocess.run(["bash", str(LINT_SH), str(proj), *extra], capture_output=True, text=True, env=env, cwd=proj)
+
+
+def lint(proj, argv_dir, config=None):
+    """run_lint in JSON mode; the parsed document."""
+    result = run_lint(proj, argv_dir, config, ("--format", "json"))
     assert result.stdout, f"no JSON on stdout; stderr tail: {result.stderr[-500:]}"
     return json.loads(result.stdout)
 
@@ -233,14 +236,26 @@ class TestMarkdownlintRules:
         assert only_call(argv_dir, "markdownlint") == [str(proj / "doc.md")]
         assert "markdownlint.rules ignored: checks.markdownlint.args takes precedence" in data["warnings"]
 
-    def test_rules_without_a_scratch_directory_warn(self, proj, argv_dir):
-        """mktemp -d failing leaves nowhere to write the rules; the fallback must not be silent."""
+    @staticmethod
+    def fail_mktemp(argv_dir):
+        """Shadow mktemp in the shim directory, so ml_lib.sh gets no scratch directory."""
         mktemp = argv_dir.parent / "shim-bin" / "mktemp"
         mktemp.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
         mktemp.chmod(0o755)
+
+    def test_rules_without_a_scratch_directory_warn_in_json(self, proj, argv_dir):
+        """mktemp -d failing leaves nowhere to write the rules: the built-in set runs, with a warning."""
+        self.fail_mktemp(argv_dir)
         data = lint(proj, argv_dir, {"markdownlint": {"rules": {"MD041": False}}})
-        assert only_call(argv_dir, "markdownlint")[1].endswith("ml_markdownlint.json")
+        call = only_call(argv_dir, "markdownlint")
+        assert call[call.index("-c") + 1].endswith("ml_markdownlint.json"), call
         assert "markdownlint.rules ignored: no scratch directory to write them to" in data["warnings"]
+
+    def test_rules_without_a_scratch_directory_warn_in_text(self, proj, argv_dir):
+        self.fail_mktemp(argv_dir)
+        result = run_lint(proj, argv_dir, {"markdownlint": {"rules": {"MD041": False}}})
+        expected = "multilint: config warning: markdownlint.rules ignored: no scratch directory to write them to"
+        assert expected in result.stderr, result.stderr[-500:]
 
     @pytest.mark.parametrize("rules", [[], "MD013", None, 1])
     def test_rules_must_be_an_object(self, proj, argv_dir, rules):
