@@ -68,6 +68,13 @@ RUN pip install --no-cache-dir --disable-pip-version-check --root-user-action=ig
     pylint==4.1.3 \
     toml-sort==0.25.0
 
+# gitleaks scans history (`detect --source <repo>`) whenever the target sits inside a repository, and
+# that mode shells out to git. Without it every such run died with `"git": executable file not found`
+# and lint.sh reported gitleaks as skipped. The version follows the pinned base image's Debian release.
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends git >/dev/null \
+    && rm -rf /var/lib/apt/lists/*
+
 # One Node: the binary and the two global packages, each with its own node_modules tree. Copying
 # only the launcher (an earlier form of this file) left markdownlint without its dependencies, and
 # every run died with "Cannot find package 'commander'".
@@ -83,7 +90,7 @@ COPY .gitleaks.toml /usr/local/bin/.gitleaks.toml
 
 # Fail the build, not the first lint, when a tool cannot start.
 RUN set -e; \
-    for tool in shellcheck shfmt bashate flake8 black pylint mypy bandit markdownlint prettier toml-sort; do \
+    for tool in shellcheck shfmt bashate flake8 black pylint mypy bandit markdownlint prettier toml-sort git; do \
         "$tool" --version >/dev/null; \
     done; \
     gitleaks version >/dev/null
