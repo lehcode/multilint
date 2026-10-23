@@ -7,6 +7,7 @@ the validation constants below so the two never drift apart. Stdlib-only.
 import json
 import shlex
 import sys
+from pathlib import Path
 
 ALL_CHECKS = (
     "bash_syntax",
@@ -32,13 +33,17 @@ OPTION_GROUPS = {
     "gitleaks": {"depth", "config"},
     "bandit": {"severity"},
     "mypy": {"cache_dir"},
+    "markdownlint": {"rules"},
 }
 OPTION_VARS = {
     ("gitleaks", "depth"): "ML_CFG_GITLEAKS_DEPTH",
     ("gitleaks", "config"): "ML_CFG_GITLEAKS_CONFIG",
     ("bandit", "severity"): "ML_CFG_BANDIT_SEVERITY",
     ("mypy", "cache_dir"): "ML_CFG_MYPY_CACHE_DIR",
+    ("markdownlint", "rules"): "ML_CFG_MARKDOWNLINT_RULES",
 }
+# The built-in markdownlint rule set (MD013 off); markdownlint.rules is overlaid on it.
+MARKDOWNLINT_DEFAULTS = Path(__file__).with_name("ml_markdownlint.json")
 
 warnings = []
 assignments = []
@@ -186,12 +191,38 @@ def parse_option(key, option_key, option_value, options):
     options[(key, option_key)] = option_value
 
 
+def markdownlint_defaults():
+    """The built-in rule set beside this script; {} with a warning when it cannot be read."""
+    try:
+        defaults = json.loads(MARKDOWNLINT_DEFAULTS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        defaults = None
+    if not isinstance(defaults, dict):
+        warnings.append("%s is unreadable; markdownlint.rules applied without defaults" % MARKDOWNLINT_DEFAULTS.name)
+        return {}
+    return defaults
+
+
+def parse_markdownlint_rules(value, options):
+    """markdownlint.rules: an object of markdownlint rule settings, stored merged over the defaults as JSON."""
+    if not isinstance(value, dict):
+        warnings.append('"markdownlint.rules" must be an object')
+        return
+    options[("markdownlint", "rules")] = json.dumps({**markdownlint_defaults(), **value})
+
+
 def parse_option_group(key, value, parsed):
     if isinstance(value, int) and not isinstance(value, bool):
         if value < 0:
             warnings.append('"%s" threshold must be a non-negative integer' % key)
         else:
             parsed["flat_thresholds"][key] = value
+    elif key == "markdownlint" and isinstance(value, dict):
+        for option_key, option_value in value.items():
+            if option_key == "rules":
+                parse_markdownlint_rules(option_value, parsed["options"])
+            else:
+                warnings.append('unknown option %s under "%s" ignored' % (jd(option_key), key))
     elif isinstance(value, dict):
         for option_key, option_value in value.items():
             parse_option(key, option_key, option_value, parsed["options"])

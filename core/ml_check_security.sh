@@ -151,9 +151,11 @@ elif command -v gitleaks >/dev/null 2>&1; then
     # image. Run on a host or in CI, gitleaks died with "unable to load gitleaks config" and, because
     # of the pass condition below, that counted as a pass. Resolved against the image path first so
     # container behaviour is unchanged, then against the copy beside this script, then dropped so
-    # gitleaks falls back to its built-in rules rather than refusing to start.
+    # gitleaks falls back to its built-in rules rather than refusing to start. The project's own
+    # .gitleaks.toml comes first: existing project configuration wins (see ml_config.sh, layer 3).
     gitleaks_config=""
     for candidate in \
+        "$GITLEAKS_NATIVE_CONFIG" \
         "$GITLEAKS_CONFIG_OVERRIDE" \
         /usr/local/bin/.gitleaks.toml \
         "$ML_DIR/.gitleaks.toml"; do
