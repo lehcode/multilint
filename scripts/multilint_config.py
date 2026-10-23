@@ -144,6 +144,8 @@ def check_option(group: str, key: str, value: str) -> str:
         raise Rejected(f"unknown option group {jd(group)}{hint}")
     if key not in OPTION_GROUPS[group]:
         raise Rejected(f"unknown option {jd(key)} for group {jd(group)}")
+    if (group, key) == ("markdownlint", "rules"):
+        raise Rejected(f"markdownlint.rules is an object of rule settings; edit {CONFIG_NAME} directly")
     choices = OPTION_CHOICES.get((group, key))
     if choices is not None and value not in choices:
         raise Rejected(f"{group}.{key} must be one of {', '.join(choices)}, not {jd(value)}")
@@ -235,6 +237,8 @@ def audit_checks(value) -> list[str]:
 
 
 def audit_option(group: str, key: str, value) -> str | None:
+    if (group, key) == ("markdownlint", "rules"):
+        return None if isinstance(value, dict) else '"markdownlint.rules" must be an object'
     if group == "gitleaks" and key == "depth" and value == 1 and not isinstance(value, bool):
         value = "1"
     if not isinstance(value, str):

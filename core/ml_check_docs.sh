@@ -13,6 +13,13 @@ info "Linting Markdown files..."
 
 mapfile -t md_files < <(ml_files '*.md' -- '*/\.*' '*/node_modules/*' '*/cache/*' '*/output/*')
 
+# markdownlint.rules from .multilint.json (see ml_config.sh) goes into the scratch directory, which
+# ml_lib.sh removes on exit. Without one, the built-in rule set in markdownlint_args stays in place.
+if [ -n "$ml_markdownlint_rules" ] && [ -n "$ML_MSG_DIR" ]; then
+    printf '%s\n' "$ml_markdownlint_rules" >"$ML_MSG_DIR/markdownlint-rules.json"
+    markdownlint_args=(-c "$ML_MSG_DIR/markdownlint-rules.json")
+fi
+
 if [ ${#md_files[@]} -eq 0 ]; then
     echo "  (none found)"
 else
@@ -21,10 +28,10 @@ else
         echo ""
         echo "  📝 $f"
 
-        # markdownlint; policy flags come from markdownlint_args (default:
-        # -c .markdownlint.json when that file exists in $PWD, computed once
-        # in the built-in defaults above, before the loader runs). The array
-        # expansion also replaces the former unquoted $MD_CONFIG word-split.
+        # markdownlint; policy flags come from markdownlint_args: empty when the project has its
+        # own markdownlint config (markdownlint finds it in $PWD), otherwise -c with the built-in
+        # rule set or the merged markdownlint.rules. The array expansion also replaces the former
+        # unquoted $MD_CONFIG word-split.
         if ! check_enabled markdownlint; then
             skipped markdownlint "disabled by checks.markdownlint.enabled"
             warn "markdownlint (disabled)"

@@ -110,7 +110,7 @@ For CI/CD pipelines and non-MCP clients — port **8591**:
 
 Any tool failure increments the fail counter; benchmark fails if ≥1/3 tools fail.
 
-**Markdown** (`*.md`) — **markdownlint** with minimal rules (MD003, MD013, MD024, MD041 disabled).
+**Markdown** (`*.md`) — **markdownlint** with every rule except MD013 (line length), unless the project has its own markdownlint config (see [A linter's own config wins](#a-linters-own-config-wins)).
 
 **YAML / JSON** — **prettier --check** (error log level).
 
@@ -152,7 +152,8 @@ Two forms per check, both accepted in the same file:
   },
   "gitleaks": { "depth": "all", "config": ".gitleaks.toml" },
   "bandit": { "severity": "-lll" },
-  "mypy": { "cache_dir": "/tmp/.mypy_cache_project" }
+  "mypy": { "cache_dir": "/tmp/.mypy_cache_project" },
+  "markdownlint": { "rules": { "MD041": false } }
 }
 ```
 
@@ -168,6 +169,7 @@ Two forms per check, both accepted in the same file:
 - `gitleaks`, `bandit`, and `mypy` double as option-group keys, disambiguated
   by JSON type: an integer is a flat threshold, an object carries
   `gitleaks.depth`/`gitleaks.config`, `bandit.severity`, or `mypy.cache_dir`.
+- `markdownlint.rules` is an object of markdownlint rule settings, merged over the built-in set (every rule, MD013 off). It is ignored, with a warning, when the project has its own markdownlint config or sets `checks.markdownlint.args`.
 
 Any key omitted resolves to its built-in default (threshold `0`, enablement
 `on`). A malformed file, an unrecognized key, or a wrongly typed value
@@ -206,7 +208,7 @@ and **policy flags** (the tool's opinionated defaults, replaced wholesale by
 | `pylint` | `--output-format=text` | `--disable=C,R,E0401,E1123,W1510` |
 | `mypy` | `--cache-dir=<mypy.cache_dir>` `--no-error-summary` | `--ignore-missing-imports --follow-imports=silent` |
 | `bandit` | `-q <bandit.severity> -f custom --msg-template ...` | empty — severity is the `bandit.severity` option, not `args` |
-| `markdownlint` | none | `-c .markdownlint.json` when that file exists in `$PWD`, else empty |
+| `markdownlint` | none | `-c <scripts>/ml_markdownlint.json` (every rule, MD013 off); with `markdownlint.rules`, `-c` a temp file holding those rules merged over that set |
 | `yaml_prettier` / `json_prettier` | `--check --log-level error` | empty |
 | `toml_sort` | `--check` | `--sort-table-keys` |
 | `security_secrets` / `security_dangerous_patterns` | grep pattern | n/a — `args` unsupported |
@@ -221,6 +223,23 @@ than merely stylistic (`shfmt`'s `-i 4`, which is what keeps it from
 contradicting `bashate`; `mypy`'s import flags, because the image installs no
 project dependencies), so replacing them produces no runtime warning — that
 is a deliberate, self-announcing choice, not an oversight.
+
+### A linter's own config wins
+
+When the project already has a linter's own config, multilint passes that linter harness flags only: its default policy flags and `checks.<name>.args` are both dropped, and the tool reads its config itself. Dropping `args` produces a warning (`checks.<name>.args ignored: <file> takes precedence`); dropping the defaults is silent. `bash_syntax`, `bashate`, `bandit` and the grep-based security checks are unaffected.
+
+| Check | Its own config, looked up in `$PWD` (the scope root) only |
+|---|---|
+| `shellcheck` | `.shellcheckrc` |
+| `shfmt` | `.editorconfig` |
+| `flake8` | `.flake8`; `[flake8]` in `setup.cfg` or `tox.ini` |
+| `black` | `[tool.black]` in `pyproject.toml` |
+| `pylint` | `.pylintrc`, `pylintrc`; `[tool.pylint…]` in `pyproject.toml`; `[pylint…]` in `setup.cfg` or `tox.ini` |
+| `mypy` | `mypy.ini`, `.mypy.ini`; `[tool.mypy]` in `pyproject.toml`; `[mypy]` in `setup.cfg` |
+| `markdownlint` | `.markdownlint.json`, `.markdownlint.jsonc`, `.markdownlint.yaml`, `.markdownlint.yml`, `.markdownlintrc` |
+| `yaml_prettier` / `json_prettier` | `.prettierrc`, `.prettierrc.{json,json5,yaml,yml,toml,js,cjs,mjs}`, `prettier.config.{js,cjs,mjs}`, a `"prettier"` key in `package.json` |
+| `toml_sort` | `[tool.tomlsort]` in `pyproject.toml` |
+| `gitleaks` | `.gitleaks.toml`, passed as `--config`; wins over `gitleaks.config` and the image's config |
 
 ### Host-plugin settings (`image`, `search_ceiling`)
 
