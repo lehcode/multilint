@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # ml_config.sh - sourced by lint.sh at top level, never run on its own.
-# Configuration: built-in defaults, then .multilint.json via ml_config_schema.py.
+# Configuration: built-in defaults, then .multilint.json via ml_config_schema.py, then the linter's own config.
 # Sets the <check>_threshold/_enabled/_args variables, the ML_CFG_* options and ml_warnings.
 # Reads and writes lint.sh globals (TARGET_DIR, OUTPUT_FORMAT, ALL_CHECKS, check_failures,
 # check_totals, check_status, check_reason, ...), so it is not wrapped in a function:
@@ -217,7 +217,7 @@ unset _ml_check _ml_native
 
 # markdownlint.rules, already merged over ml_markdownlint.json by the loader. It applies only
 # when neither the project's own markdownlint config nor checks.markdownlint.args is set;
-# ml_check_docs.sh writes it into lint.sh's scratch directory, which is removed on exit.
+# ml_check_docs.sh writes it into the scratch directory ml_lib.sh creates and removes on exit.
 ml_markdownlint_rules=""
 if [ -n "$ML_CFG_MARKDOWNLINT_RULES" ]; then
     if _ml_native="$(ml_native_config markdownlint)"; then
@@ -276,7 +276,7 @@ if [ -f "$PWD/.gitleaks.toml" ]; then
     fi
 fi
 
-# 3. Warnings -- printed once, regardless of output format, since this
+# 4. Warnings -- printed once, regardless of output format, since this
 # explicit stderr redirect (>&2) bypasses the JSON-mode stdout swap above.
 for ml_warning in "${ml_warnings[@]+"${ml_warnings[@]}"}"; do
     printf 'multilint: config warning: %s\n' "$ml_warning" >&2
