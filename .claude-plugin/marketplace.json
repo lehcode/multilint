@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "multilint",
-      "source": { "source": "npm", "package": "@lehcode/multilint" },
+      "source": "./",
       "description": "Lints changed files on the host after every edit, and adds a linting subagent. Missing linters are reported as skipped."
     }
   ]
