@@ -14,10 +14,16 @@ info "Linting Markdown files..."
 mapfile -t md_files < <(ml_files '*.md' -- '*/\.*' '*/node_modules/*' '*/cache/*' '*/output/*')
 
 # markdownlint.rules from .multilint.json (see ml_config.sh) goes into the scratch directory, which
-# ml_lib.sh removes on exit. Without one, the built-in rule set in markdownlint_args stays in place.
-if [ -n "$ml_markdownlint_rules" ] && [ -n "$ML_MSG_DIR" ]; then
-    printf '%s\n' "$ml_markdownlint_rules" >"$ML_MSG_DIR/markdownlint-rules.json"
-    markdownlint_args=(-c "$ML_MSG_DIR/markdownlint-rules.json")
+# ml_lib.sh creates and removes on exit. Without one, the built-in rule set in markdownlint_args
+# stays in place. Config warnings are already printed to stderr by now, so this one reaches the
+# JSON report only.
+if [ -n "$ml_markdownlint_rules" ]; then
+    if [ -n "$ML_MSG_DIR" ]; then
+        printf '%s\n' "$ml_markdownlint_rules" >"$ML_MSG_DIR/markdownlint-rules.json"
+        markdownlint_args=(-c "$ML_MSG_DIR/markdownlint-rules.json")
+    else
+        ml_warnings+=("markdownlint.rules ignored: no scratch directory to write them to")
+    fi
 fi
 
 if [ ${#md_files[@]} -eq 0 ]; then

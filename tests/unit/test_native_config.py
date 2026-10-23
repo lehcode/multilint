@@ -233,6 +233,15 @@ class TestMarkdownlintRules:
         assert only_call(argv_dir, "markdownlint") == [str(proj / "doc.md")]
         assert "markdownlint.rules ignored: checks.markdownlint.args takes precedence" in data["warnings"]
 
+    def test_rules_without_a_scratch_directory_warn(self, proj, argv_dir):
+        """mktemp -d failing leaves nowhere to write the rules; the fallback must not be silent."""
+        mktemp = argv_dir.parent / "shim-bin" / "mktemp"
+        mktemp.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        mktemp.chmod(0o755)
+        data = lint(proj, argv_dir, {"markdownlint": {"rules": {"MD041": False}}})
+        assert only_call(argv_dir, "markdownlint")[1].endswith("ml_markdownlint.json")
+        assert "markdownlint.rules ignored: no scratch directory to write them to" in data["warnings"]
+
     @pytest.mark.parametrize("rules", [[], "MD013", None, 1])
     def test_rules_must_be_an_object(self, proj, argv_dir, rules):
         data = lint(proj, argv_dir, {"markdownlint": {"rules": rules}})
