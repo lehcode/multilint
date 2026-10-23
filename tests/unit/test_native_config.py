@@ -184,6 +184,14 @@ class TestProjectArgsYieldToNativeConfig:
         assert yaml_calls and all("--tab-width=4" not in call for call in yaml_calls), yaml_calls
         assert f"checks.yaml_prettier.args ignored: {native} takes precedence" in data["warnings"]
 
+    def test_prettier_dependency_is_not_a_config(self, proj, argv_dir):
+        """Only a top-level "prettier" key configures prettier; a devDependency entry does not."""
+        (proj / "package.json").write_text('{\n  "devDependencies": {\n    "prettier": "^3.0.0"\n  }\n}\n')
+        data = lint(proj, argv_dir, {"checks": {"yaml_prettier": {"args": ["--tab-width=4"]}}})
+        yaml_calls = [call for call in invocations(argv_dir, "prettier") if call[-1].endswith("data.yaml")]
+        assert yaml_calls and all("--tab-width=4" in call for call in yaml_calls), yaml_calls
+        assert not any("takes precedence" in w for w in data["warnings"]), data["warnings"]
+
     def test_prettier_args_without_native_config(self, proj, argv_dir):
         lint(proj, argv_dir, {"checks": {"yaml_prettier": {"args": ["--tab-width=4"]}}})
         yaml_calls = [call for call in invocations(argv_dir, "prettier") if call[-1].endswith("data.yaml")]
