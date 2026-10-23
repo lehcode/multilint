@@ -161,6 +161,19 @@ ml_first_section() {
     done
     return 1
 }
+# ml_package_json_key <key>: print package.json when $PWD/package.json has <key> at its top level.
+# Parsed rather than grepped: a "prettier" dependency entry is nested, and is not a config. -I keeps
+# python3 from importing modules out of $PWD, which is the project being linted.
+ml_package_json_key() {
+    [ -f "$PWD/package.json" ] && command -v python3 >/dev/null 2>&1 || return 1
+    python3 -I -c 'import json, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if isinstance(doc, dict) and sys.argv[2] in doc else 1)' "$PWD/package.json" "$1" || return 1
+    echo package.json
+}
 # ml_native_config <check>: print the file holding the check's own config; fail when there is none.
 # bashate and bandit are absent: the way lint.sh runs them, neither reads a project config file.
 ml_native_config() {
@@ -184,7 +197,7 @@ ml_native_config() {
         ml_first_file .prettierrc .prettierrc.json .prettierrc.json5 .prettierrc.yaml .prettierrc.yml \
             .prettierrc.toml .prettierrc.js .prettierrc.cjs .prettierrc.mjs \
             prettier.config.js prettier.config.cjs prettier.config.mjs ||
-            ml_first_section '[[:space:]]*"prettier"[[:space:]]*:' package.json
+            ml_package_json_key prettier
         ;;
     toml_sort) ml_first_section '\[tool\.tomlsort\]' pyproject.toml ;;
     *) return 1 ;;
