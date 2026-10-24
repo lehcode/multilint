@@ -210,8 +210,9 @@ for _ml_check in "${ALL_CHECKS[@]}"; do
     if grep -q "^${_ml_check}_args=" <<<"$ml_json_applied"; then
         ml_warnings+=("checks.${_ml_check}.args ignored: $_ml_native takes precedence")
     fi
-    # Names come from ALL_CHECKS, never from input.
-    eval "${_ml_check}_args=()"
+    # Empties the array named <check>_args; names come from ALL_CHECKS, never from input. read
+    # rather than eval, which the dangerous-pattern check flags whatever the operand.
+    read -r -a "${_ml_check}_args" <<<""
 done
 unset _ml_check _ml_native
 
