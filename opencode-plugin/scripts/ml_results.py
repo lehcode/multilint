@@ -5,7 +5,6 @@ Imported by lint_changed.py, which is the hook entry point.
 
 from __future__ import annotations
 
-
 # Nothing is filtered out of the skipped set any more. gitleaks used to be listed here because
 # lint.sh gated it on "$TARGET_DIR/.git" and a single-file target can never satisfy that, so it was
 # reported skipped after every edit. lint.sh now selects `--no-git` when there is no repository, so

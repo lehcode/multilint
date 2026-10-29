@@ -14,7 +14,6 @@ from pathlib import Path
 
 import ml_settings
 
-
 # Wall-clock ceiling for the whole container, not per file. Generous because a first pull has to
 # fetch the image, and a timeout here means the edit is reported as unchecked rather than clean.
 RUN_TIMEOUT_SECONDS = 300
