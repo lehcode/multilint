@@ -1,7 +1,7 @@
 {
   "name": "multilint",
   "description": "Lints changed files on the host after every edit. Missing linters are reported as skipped.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "author": {
     "name": "Anton Repin"
   },

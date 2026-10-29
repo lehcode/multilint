@@ -23,7 +23,7 @@ import ml_state
 # (`python3 lint_changed.py --set image local/build:dev`).
 # Pinned to the release that ships this plugin, never :latest, so the toolchain cannot drift from
 # the engine. release-please bumps the tag through the marker comment.
-DEFAULT_IMAGE = "lehcode/multilint:v0.2.1"  # x-release-please-version
+DEFAULT_IMAGE = "lehcode/multilint:v0.3.0"  # x-release-please-version
 
 
 # The two host-plugin settings that are not linter configuration -- they shape how the plugin runs,
