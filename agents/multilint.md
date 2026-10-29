@@ -17,13 +17,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint_changed.py" --run "${ROOT}" "${TARGE
 What `--run` does, so you can explain it — do not rebuild the command by hand:
 
 | Property | Reason |
-|---|---|
+| --- | --- |
 | One ephemeral container (`docker run --rm`) per request | Nothing persists between runs; Docker is the only dependency. |
 | The plugin's own `scripts/` mounted read-only at `/opt/multilint` | The container runs this plugin's `lint.sh`; the image supplies only the linters. |
 | `ROOT` mounted read-only at its own path | Findings name the paths the host uses; nothing can be auto-fixed. |
 | Working directory `ROOT` | `lint.sh` resolves `.multilint.json` and `.markdownlint.json` there. Pass the project root, not a subdirectory, or per-project config is ignored. |
 | `--network none`, `--user <uid>:<gid>`, `--memory 2g --cpus 2` | No network, nothing runs as root, and the run cannot starve the machine. |
-| Image | The `image` setting when set, otherwise the release tag pinned in `lint_changed.py`. |
+| Image | The `image` setting when set, otherwise the release tag pinned in `ml_settings.py`. |
 
 `ROOT` is an absolute host path — the git root, or the directory containing what you are linting.
 `TARGET` is relative to `ROOT`; a directory lints a tree, a file lints one file. Exit status 1 means
@@ -48,7 +48,7 @@ harness flags only. `gitleaks`, `bandit`, and `mypy` also accept an options obje
 (`depth`/`config`, `severity`, `cache_dir` respectively). `markdownlint.rules` is an object of markdownlint rule settings merged over the built-in set (every rule, MD013 off).
 
 | Check | Harness flags (always kept) | Default policy flags (`args` replaces these) |
-|---|---|---|
+| --- | --- | --- |
 | `bash_syntax` | `-n` | n/a — `args` unsupported |
 | `shellcheck` | `-f gcc` (after the policy flags, so findings parse) | `-e SC1091 -e SC2155 -e SC2086 -S style` |
 | `bashate` | none | `-i E006` |
@@ -67,7 +67,7 @@ harness flags only. `gitleaks`, `bandit`, and `mypy` also accept an options obje
 A linter's own config in `$PWD` wins: the default policy flags and `checks.<name>.args` are dropped, harness flags stay, and dropped `args` (or `markdownlint.rules`) produce a `takes precedence` warning.
 
 | Check | Its own config, looked up in `$PWD` (the scope root) only |
-|---|---|
+| --- | --- |
 | `shellcheck` | `.shellcheckrc` |
 | `shfmt` | `.editorconfig` |
 | `flake8` | `.flake8`; `[flake8]` in `setup.cfg` or `tox.ini` |
@@ -147,7 +147,7 @@ python3 "$ML" search-ceiling /home/user/projects
 
 Only `image` and `search_ceiling` are settings; anything else exits non-zero and writes nothing. A
 setting that is not stored falls back to its built-in default (the release tag pinned in
-`lint_changed.py` for `image`, the user's home directory for `search_ceiling`). Do not add these two settings to
+`ml_settings.py` for `image`, the user's home directory for `search_ceiling`). Do not add these two settings to
 `.multilint.json`, since they configure the plugin process, not a check.
 
 ## Reading the result
@@ -156,7 +156,7 @@ setting that is not stored falls back to its built-in default (the release tag p
 under `checks`:
 
 | Field | Meaning |
-|---|---|
+| --- | --- |
 | `status` | `ok`, `failed`, or `skipped` |
 | `failed` | units that failed (for `gitleaks`, findings) |
 | `total` | units submitted to the tool; `0` when skipped |
