@@ -1,5 +1,5 @@
 {
-  "name": "multilint",
+  "name": "lehcode",
   "description": "Multi-language linting for Claude Code: lints each edited file on the host.",
   "owner": {
     "name": "Anton Repin"
