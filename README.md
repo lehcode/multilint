@@ -275,7 +275,7 @@ CI (`Develop Checks`) runs the unit tests, flake8, black, shellcheck and the npm
 
 ### Releases
 
-Conventional commits on `master` drive [release-please](https://github.com/googleapis/release-please): it keeps a release PR open, and merging it tags `v<version>` and publishes the GitHub release. The tag builds and pushes the image to Docker Hub and ghcr.io; the release stages the npm package through npm trusted publishing (no token in CI), which a maintainer promotes with `npm stage approve <stage-id>`.
+Conventional commits on `master` drive [release-please](https://github.com/googleapis/release-please): it keeps a release PR open and queues it for auto-merge, so the PR merges once the required checks pass. The merge tags `v<version>` and publishes the GitHub release; the tag builds and pushes the image to Docker Hub and ghcr.io, and the release publishes the npm package through npm trusted publishing (no token in CI). Only `feat`, `fix` and breaking changes produce a release.
 
 ## Troubleshooting
 

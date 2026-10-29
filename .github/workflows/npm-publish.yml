@@ -27,9 +27,8 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
 
-      # The npm bundled with Node 22 predates `npm stage`, so the staging step
-      # fails with `Unknown command: "stage"`. Upgrade before using it; it also
-      # brings trusted publishing (OIDC), which needs npm >= 11.5.1.
+      # Trusted publishing (OIDC) needs npm >= 11.5.1, newer than the npm
+      # bundled with Node 22.
       - name: Upgrade npm
         run: |
           npm install -g npm@latest
@@ -50,17 +49,11 @@ jobs:
           fi
           echo "version $pkg matches tag"
 
-      # Stages the version rather than publishing it. Authentication is npm
-      # trusted publishing (trusted publisher: repo lehcode/multilint, workflow
-      # npm-publish.yml); no npm token is stored in CI. A maintainer promotes
-      # the staged version with `npm stage approve <stage-id>`, supplying 2FA.
+      # Publishes straight to `latest`. Authentication is npm trusted
+      # publishing (trusted publisher: repo lehcode/multilint, workflow
+      # npm-publish.yml); no npm token is stored in CI.
       #
       # prepublishOnly runs here and rebuilds dist/ from src/, so the tarball
       # never ships a stale committed bundle.
-      - name: Stage release
-        run: npm stage publish --provenance --access public
-
-      - name: Report staged version
-        run: |
-          echo "Staged $(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")."
-          echo "Promote it with: npm stage list && npm stage approve <stage-id>"
+      - name: Publish
+        run: npm publish --provenance --access public
