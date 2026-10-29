@@ -2,6 +2,13 @@
 
 All notable changes to MultiLint. This file follows [Keep a Changelog](https://keepachangelog.com/) and [SemVer](https://semver.org/).
 
+## [0.3.1](https://github.com/lehcode/multilint/compare/v0.3.0...v0.3.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **ci:** parse the release PR number in the shell ([69983d3](https://github.com/lehcode/multilint/commit/69983d341724a627941c38cc33ea6e3e49d29ac0))
+
 ## [0.3.0](https://github.com/lehcode/multilint/compare/v0.2.1...v0.3.0) (2026-10-29)
 
 
