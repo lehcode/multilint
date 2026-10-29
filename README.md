@@ -1,97 +1,64 @@
 # multilint
 
-An opencode MCP server that delegates code quality checks to AI clients. One server, three tools, eleven checks across five file types — shell, Python, Markdown, YAML/JSON, and TOML. Agents never invoke shellcheck, black, pylint, or gitleaks directly; they call `lint_files()` and receive structured results.
+[![Develop Checks](https://github.com/lehcode/multilint/actions/workflows/develop-checks.yml/badge.svg)](https://github.com/lehcode/multilint/actions/workflows/develop-checks.yml)
+[![CodeQL](https://github.com/lehcode/multilint/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/lehcode/multilint/actions/workflows/github-code-scanning/codeql)
+[![Gitleaks](https://github.com/lehcode/multilint/actions/workflows/gitleaks.yml/badge.svg)](https://github.com/lehcode/multilint/actions/workflows/gitleaks.yml)
+[![Docker publish](https://github.com/lehcode/multilint/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/lehcode/multilint/actions/workflows/docker-publish.yml)
+[![npm publish](https://github.com/lehcode/multilint/actions/workflows/npm-publish.yml/badge.svg)](https://github.com/lehcode/multilint/actions/workflows/npm-publish.yml)
+[![GitHub release](https://img.shields.io/github/v/release/lehcode/multilint)](https://github.com/lehcode/multilint/releases)
+[![npm](https://img.shields.io/npm/v/@lehcode/multilint)](https://www.npmjs.com/package/@lehcode/multilint)
+[![Docker image](https://img.shields.io/docker/v/lehcode/multilint?sort=semver&label=docker)](https://hub.docker.com/r/lehcode/multilint)
+[![Image size](https://img.shields.io/docker/image-size/lehcode/multilint?sort=semver)](https://hub.docker.com/r/lehcode/multilint)
+[![License: MIT](https://img.shields.io/github/license/lehcode/multilint)](LICENSE)
+[![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-yellow.svg)](https://www.conventionalcommits.org)
 
-Compatible with any MCP-compatible client (Claude Code, Cursor, custom agents).
+Lints every file an AI coding agent edits, and hands the findings straight back to the agent. multilint ships as a **Claude Code plugin** and an **OpenCode plugin**; both run the same engine — 16 checks across shell, Python, Markdown, YAML/JSON and TOML, plus secret scanning — in a short-lived Docker container, one per lint.
 
 ## Prerequisites
 
-- **Docker** (with compose plugin)
-- **opencode** (for MCP client installation)
-- **Git** (for gitleaks scanning)
+- **Docker** — every lint runs in a throwaway `lehcode/multilint` container (about 500 MB, pulled once). Without Docker the hook reports the file as unverified.
+- **python3** on the host — runs the hook. Without it the hook prints a notice and exits.
+- **Git** (optional) — `gitleaks` scans repository history.
 
 ## Installation
 
-### opencode (preferred)
-
-```sh
-opencode mcp add multilint --url http://localhost:8592/mcp
-```
-
 ### Claude Code
 
-Claude Code uses `claude mcp add` to connect. Use `--transport http` with the `/mcp` endpoint:
-
-```sh
-claude mcp add --transport http multilint http://localhost:8592/mcp
+```text
+/plugin marketplace add lehcode/multilint
+/plugin install multilint@lehcode
 ```
 
-Add `--scope user` for global scope, `--scope project` to write `.mcp.json` (shared with team).
+The plugin adds a `PostToolUse` hook on `Write|Edit` and a `multilint` subagent for explicit lint and configuration requests.
 
-**JSON config** (`.mcp.json` in project root, or `~/.claude.json` globally):
+### OpenCode
+
+Add the npm package to `opencode.json` (or `opencode.jsonc`); OpenCode installs it on first load:
 
 ```json
 {
-  "mcpServers": {
-    "multilint": {
-      "type": "http",
-      "url": "http://localhost:8592/mcp"
-    }
-  }
+  "plugin": ["@lehcode/multilint"]
 }
 ```
 
-> **Note**: Claude Code's CLI `--transport` flag only accepts `stdio`, `sse`, `http` (not `streamable-http`). Use `type: "http"` in JSON — `streamable-http` works as an alias there.
+Pin a version with `@lehcode/multilint@<version>`. The plugin supports OpenCode V1 (`tool.execute.after`) and V2 (`execute.after`).
 
-**Verify:**
+## How it works
 
-```sh
-claude mcp list
-claude mcp get multilint
-```
+1. The agent writes or edits a file with a lintable extension: `.sh`, `.bash`, `.py`, `.md`, `.yaml`, `.yml`, `.json`, `.toml`.
+2. The plugin passes the edit to `scripts/multilint.sh`, which runs `scripts/lint_changed.py`. It finds the project root (the git root, searched no higher than the `search_ceiling` setting) and skips the file when its content has not changed since the last lint, re-reporting the last verdict instead.
+3. `lint_changed.py` starts one ephemeral container:
 
-Or inside a Claude Code session: `/mcp`
+   | Property | Reason |
+   | --- | --- |
+   | `docker run --rm`, one per lint | Nothing persists between runs; Docker is the only dependency. |
+   | The plugin's own `scripts/` mounted read-only at `/opt/multilint` | The container runs the plugin's `lint.sh`; the image supplies only the linters. |
+   | The project root mounted read-only at its own path, and used as the working directory | Findings name host paths, nothing can be auto-fixed, and `.multilint.json` resolves from the root. |
+   | `--network none`, `--user <uid>:<gid>`, `--memory 2g --cpus 2` | No network, nothing runs as root, and a run cannot starve the machine. |
 
-### Other MCP clients
+4. Findings, fix hints and violated rules go back to the agent (Claude Code: `additionalContext`, plus a one-line `systemMessage` for the user; OpenCode: appended to the tool result). A check that could not run is reported as skipped, never as a pass.
 
-Same connection string — any MCP-compatible client connects identically:
-
-```json
-{
-  "mcpServers": {
-    "multilint": {
-      "type": "http",
-      "url": "http://localhost:8592/mcp"
-    }
-  }
-}
-```
-
-## Tools
-
-| Tool | Parameters | Purpose |
-|------|-----------|---------|
-| `lint_files` | `path` (string), `cwd` (string) | Run full linting pipeline against target directory |
-| `health_check` | none | Verify service is running |
-| `get_help` | none | Usage information |
-
-All parameters default to workspace root (`.`) and server working directory respectively.
-
-## HTTP API
-
-For CI/CD pipelines and non-MCP clients — port **8591**:
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `POST /lint` | POST | Run linting pipeline with JSON payload |
-| `GET /health` | GET | Health check |
-| `GET /` | GET | Service info |
-
-**POST /lint payload:**
-
-```json
-{"path": "./my-dir/", "cwd": "/workspace/"}
-```
+Only the edited file is linted; changes made outside a write tool (`sed -i` through Bash, a generator) are not picked up. Use the subagent, or `lint_changed.py --run <root> <target>`, to lint a directory.
 
 ## Checks
 
@@ -102,13 +69,13 @@ For CI/CD pipelines and non-MCP clients — port **8591**:
 - **Bashate** — 4-space indentation, E006 (line length) excluded
 - **shfmt** — format check only
 
-**Python** (`*.py`) — 3/3 code quality benchmark:
+**Python** (`*.py`):
 
 - **flake8** (style, 120-col, ignores E203/E111/E121/E124/BLK100)
 - **black** (formatting, 120-col)
 - **pylint** (errors/warnings, disables C,R,E0401,E1123,W1510)
-
-Any tool failure increments the fail counter; benchmark fails if ≥1/3 tools fail.
+- **mypy** (`--ignore-missing-imports --follow-imports=silent`)
+- **bandit** (security linter; severity set by `bandit.severity`)
 
 **Markdown** (`*.md`) — **markdownlint** with every rule except MD013 (line length), unless the project has its own markdownlint config (see [A linter's own config wins](#a-linters-own-config-wins)).
 
@@ -130,6 +97,8 @@ no environment-variable layer for any threshold, enablement flag, or tool
 option (user decision, 2026-09-30: environment variables are not a multilint
 configuration surface) — a setting is either a value in this file or the
 built-in default; nothing else participates.
+
+Ask the `multilint` subagent to change it ("disable gitleaks", "allow 2 flake8 failures"), or run the config script that ships with the plugin: `python3 <plugin>/scripts/multilint_config.py <verb>` with `show`, `enable`, `disable`, `threshold`, `args`, `clear-args` or `option`, and `--root <dir>` first to target another project.
 
 ### Lookup order
 
@@ -198,7 +167,7 @@ and **policy flags** (the tool's opinionated defaults, replaced wholesale by
 `checks.<name>.args` when present):
 
 | Check | Harness flags (always passed) | Default policy flags (`args` replaces these) |
-|---|---|---|
+| --- | --- | --- |
 | `bash_syntax` | `-n` | n/a — `args` unsupported |
 | `shellcheck` | `-f gcc` (after the policy flags, so findings parse) | `-e SC1091 -e SC2155 -e SC2086 -S style` |
 | `bashate` | none | `-i E006` |
@@ -229,7 +198,7 @@ is a deliberate, self-announcing choice, not an oversight.
 When the project already has a linter's own config, multilint passes that linter harness flags only: its default policy flags and `checks.<name>.args` are both dropped, and the tool reads its config itself. Dropping `args` produces a warning (`checks.<name>.args ignored: <file> takes precedence`); dropping the defaults is silent. `bash_syntax`, `bashate`, `bandit` and the grep-based security checks are unaffected.
 
 | Check | Its own config, looked up in `$PWD` (the scope root) only |
-|---|---|
+| --- | --- |
 | `shellcheck` | `.shellcheckrc` |
 | `shfmt` | `.editorconfig` |
 | `flake8` | `.flake8`; `[flake8]` in `setup.cfg` or `tox.ini` |
@@ -243,24 +212,16 @@ When the project already has a linter's own config, multilint passes that linter
 
 ### Host-plugin settings (`image`, `search_ceiling`)
 
-The Docker image both plugins run and the highest directory the Python hook
-may search for a project root are **not** `.multilint.json` keys — they
-configure the plugin process itself, not a check. They live in a small
-SQLite `settings` table instead, managed through a CLI mode in
-`claude-plugin/scripts/lint_changed.py`:
+The Docker image both plugins run and the highest directory the Python hook may search for a project root are **not** `.multilint.json` keys — they configure the plugin process itself, not a check. They live in a SQLite `settings` table in `$XDG_STATE_HOME/multilint/changes.db` (default `~/.local/state/multilint/`), written only by `lint_changed.py`:
 
 ```bash
-python3 claude-plugin/scripts/lint_changed.py --set image local/multilint:dev
-python3 claude-plugin/scripts/lint_changed.py --get image
-python3 claude-plugin/scripts/lint_changed.py --unset image
-python3 claude-plugin/scripts/lint_changed.py --set search_ceiling /home/user/projects
+python3 <plugin>/scripts/multilint_config.py image local/multilint:dev
+python3 <plugin>/scripts/multilint_config.py unset-image
+python3 <plugin>/scripts/multilint_config.py search-ceiling /home/user/projects
+python3 <plugin>/scripts/multilint_config.py unset-search-ceiling
 ```
 
-Only `image` and `search_ceiling` are accepted keys; any other key exits
-non-zero and writes nothing. A key with no stored setting falls back to its
-built-in default (`lehcode/multilint:latest` for `image`, the user's home
-directory for `search_ceiling`). The OpenCode plugin reads the same table
-read-only and never writes to it.
+The config script delegates to `lint_changed.py --set/--get/--unset`, which can also be called directly. Only `image` and `search_ceiling` are accepted keys; any other key exits non-zero and writes nothing. A key with no stored setting falls back to its built-in default: the release tag pinned in `scripts/ml_settings.py` (`lehcode/multilint:v<version>`) for `image`, the user's home directory for `search_ceiling`. The OpenCode plugin reads the same table read-only and never writes to it.
 
 ## Policies
 
@@ -269,73 +230,14 @@ read-only and never writes to it.
 - **4-space indentation**: enforced by both `bashate` and `shfmt -i 4`. The `-i 4` is required — shfmt's default is tab indents, which `bashate` rejects as E002, so without it the two checks demand opposite things and no shell file can pass both.
 - **Bashate E006**: excluded (line length)
 
-## Deployment
+## Output format
 
-MultiLint runs as a Docker container with `restart: unless-stopped`. The container is the deployment mechanism, not the product — the MCP server and HTTP API are what clients consume.
+`lint.sh` supports a `--format` flag:
 
-```bash
-cd <project-root>
-docker compose build
-docker compose up -d
-```
+- `text` (default) — human-readable report on stdout, config warnings on stderr
+- `json` — the JSON document on stdout (`summary`, `checks`, `warnings`, `return_code`, `files`), the human-readable report on stderr
 
-The compose file mounts `MULTILINT_WORKSPACE` read-only at `/workspace` inside the container, defaulting to the directory you run compose from. This is what AI agents and CI pipelines lint. Set it explicitly to lint somewhere else:
-
-```bash
-MULTILINT_WORKSPACE=/path/to/project docker compose up -d
-```
-
-## Developer Guide
-
-### Dockerfile Stages
-
-**Stage 1 — `node-tools`**: `node:20` installs `markdownlint-cli` and `prettier` globally. Only used to copy binaries into the final image.
-
-**Stage 2 — `python:3.12-slim`**: Runtime base. Three categories:
-
-| Category | Packages | Install method |
-|----------|----------|----------------|
-| System | `shellcheck`, `shfmt`, `bash`, `curl`, `nodejs` | apt |
-| Node.js | `prettier` (markdownlint from stage 1) | corepack |
-| Python | `flake8`, `pylint`, `black`, `mypy`, `bashate`, `bandit`, `fastmcp`, `mcp`, `toml-sort` | pip |
-
-Gitleaks (v8.30.1) downloaded directly from GitHub releases.
-
-### File Placement
-
-All source files copied to `/usr/local/bin/`: `lint.sh`, `.gitleaks.toml`, `server.py`, `mcp_server.py`, `entrypoint.sh`.
-
-### ENTRYPOINT
-
-`/usr/local/bin/entrypoint.sh` — dispatches based on `CONTINUOUS_LINT`:
-
-- `1` → runs HTTP + MCP servers as persistent background processes
-- `0`/unset → runs `lint.sh` and exits
-
-### Invocation: `path` vs `cwd`
-
-The `lint_files` tool takes two string parameters with different roles:
-
-| Parameter | Role | What it controls |
-|-----------|------|-----------------|
-| `path` | **What** to lint | Directory where `find` searches for files (passed to `lint.sh` as `$1`) |
-| `cwd` | **Context** for linting | Working directory for `subprocess.run()` — controls import resolution, relative includes, git history scanning |
-
-**Example:** `lint_files(path="./src/", cwd="/home/takeshi/my-project/")`
-
-- `path="./src/"` → `lint.sh` runs `find ./src/` → only lints files under `./src/`
-- `cwd` → Python imports resolve from there, `gitleaks --source` sees the `.git`, shell `source ../config.sh` resolves relative to the project root
-
-In the typical case both are the same — the repo root. `cwd` matters when the repo root differs from the subdirectory you want to lint.
-
-### Output Format
-
-`lint.sh` supports a `--format` flag (applies to direct invocation and the HTTP API):
-
-- `text` (default) — terminal output to stderr, JSON summary to stdout
-- `json` — structured output on stdout with `summary`, `checks`, `return_code`, and `files` fields
-
-The MCP tools always return structured results regardless of this flag.
+Both plugins run `lint.sh --format json`.
 
 **Findings.** In `json` mode every failed check also carries the reason, so a client never has to re-run a linter. All three fields are additive; no existing field changes name, type or position:
 
@@ -345,91 +247,50 @@ The MCP tools always return structured results regardless of this flag.
 
 Both plugins build their notice from these fields and fall back to the old `✗`/`⚠` marker lines when a document has no `findings` (an older image).
 
-### Optimization
+## Developer guide
 
-- `pip install --no-cache-dir` — no pip cache persisted
-- `rm -rf /var/lib/apt/lists/*` — apt cache cleaned
-- `mypy` installed for dev testing only (not used in linting)
-- `bandit` installed but lint.sh uses grep-based security scanning
+### Layout
 
-## OpenCode Integration
+| Path | Content |
+| --- | --- |
+| `core/` | The engine: `lint.sh` with `ml_*.sh` / `ml_*.py` modules, the hook (`lint_changed.py`, `multilint.sh`) and the config script. Edit here only. |
+| `scripts/`, `claude-plugin/scripts/`, `opencode-plugin/scripts/` | Copies of `core/`, written by `scripts/sync-core.sh`; `scripts/sync-core.sh --check` fails on drift (pre-commit hook). |
+| `.claude-plugin/`, `hooks/`, `agents/` | Claude Code marketplace, plugin manifest, hook and subagent. |
+| `src/`, `dist/`, `index.js` | OpenCode plugin: TypeScript source, esbuild bundle (`npm run build`), V2 directory entry. |
+| `Dockerfile` | Linter toolchain image; it contains no multilint code. |
 
-MultiLint integrates with OpenCode through three mechanisms, configured in `opencode.json`:
+### Docker image
 
-### 1. Plugin — Automatic linting on file save
+Three stages: `node-tools` installs `markdownlint-cli` and `prettier`; `binaries` downloads `shellcheck`, `shfmt` and `gitleaks` (8.30.1); the final `python:3.12-slim` stage pip-installs `flake8`, `black`, `pylint`, `mypy`, `bandit`, `bashate` and `toml-sort`, adds `git`, copies the node tools, binaries and `.gitleaks.toml`, verifies every tool, and runs as `nobody`. There is no entrypoint: the plugin mounts its own `lint.sh` at `/opt/multilint` and runs it.
 
-```json
-"plugin": ["./.opencode/plugins/multilint"]
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/unit -q
+python -m pytest tests/integration -q   # needs Docker and the image; skipped otherwise
 ```
 
-The plugin runs linting automatically after every file save — no agent involvement needed.
+CI (`Develop Checks`) runs the unit tests, flake8, black, shellcheck and the npm build on pull requests into `develop` and `master`.
 
-**How it works:**
+### Releases
 
-1. OpenCode loads `./.opencode/plugins/multilint/index.js` as a V2 plugin (`export default { id, setup }`)
-2. The plugin hooks into `ctx.tool.hook("execute.after", ...)` — fires after every tool execution
-3. Extracts the file path from tool input, checks extension against whitelist
-4. Calls `POST http://localhost:8591/lint` with the file's parent directory
-5. Errors are **appended to the tool result** so the agent sees them in context
-6. Silent if server is unreachable or no errors found
-
-**Flow:**
-
-```text
-Agent writes sample.sh → tool executes → execute.after fires
-  → Plugin checks ext=".sh" → matches whitelist
-  → Plugin POSTs to /lint with path="./test-lint/"
-  → Plugin appends errors to tool result
-  → Agent sees: "multilint reported errors in sample.sh. Fix them before continuing."
-```
-
-**Lintable extensions:** `.sh`, `.bash`, `.py`, `.md`, `.yaml`, `.yml`, `.json`, `.toml`
-
-### 2. MCP Server — Manual linting via `lint_files()`
-
-```json
-"mcp": {
-  "servers": {
-    "multilint": {
-      "type": "remote",
-      "url": "http://localhost:8592/mcp"
-    }
-  }
-}
-```
-
-Connects the OpenCode agent to the multilint MCP server on port 8592 (streamable-http transport). The agent calls `multilint.lint_files(path, cwd)` to run the full pipeline on any directory and receives structured results (`stdout`, `stderr`, `return_code`).
-
-Use this for **explicit/manual linting** or when the agent needs to lint an arbitrary directory not being edited.
-
-### 3. Agent — Dedicated system prompt
-
-```json
-"agent": {
-  "multilint": {
-    "description": "Run code quality linting via the multilint service.",
-    "prompt": "agents/multilint.md"
-  }
-}
-```
-
-When the multilint agent is selected, OpenCode loads `agents/multilint.md` as the system prompt. This gives the agent instructions on when and how to use the multilint MCP tools.
-
-### Configuration
-
-The OpenCode plugin reads no environment variables. It runs the image named by the `image` setting (see "Host-plugin settings" above), else `lehcode/multilint:latest`, and lints with the project's `.multilint.json`.
-
-### Limitations
-
-- Plugin only hooks into tool executions; not triggered by file watchers or external edits
-- Plugin is non-blocking — failures do not prevent the save from completing
+Conventional commits on `master` drive [release-please](https://github.com/googleapis/release-please): it keeps a release PR open, and merging it tags `v<version>` and publishes the GitHub release. The tag builds and pushes the image to Docker Hub and ghcr.io; the release stages the npm package through npm trusted publishing (no token in CI), which a maintainer promotes with `npm stage approve <stage-id>`.
 
 ## Troubleshooting
 
-**AI agent can't connect** — verify the container is running (`docker ps --filter name=multilint`) and port 8592 is reachable.
+**`docker not found on PATH` or the daemon is unreachable** — the file is reported as unverified, not clean. Start Docker; the first lint pulls the image.
 
-**Lint results are empty or "(none found)"** — the target path or working directory is incorrect. Verify with the MCP `get_help()` tool or `GET /`.
+**A check reports `skipped`** — it did not run (disabled, tool missing, or nothing applicable). `skipped` is never a pass; the notice names the reason.
+
+**`gitleaks` never runs on an edited file** — it scans history and only runs when the target contains `.git`. Lint the repository root through the subagent to exercise it.
 
 **`pylint` passes a file you expect to fail** — only error-class messages are enabled. Run `pylint` directly for the full report.
 
-**Security checks fail on legitimate files** — hardcoded secrets detection excludes `server.py`, `mcp_server.py`, `test_*.py`, and `__init__.py`. Adjust thresholds in `.multilint.json`, or disable a check with `"checks": {"security_secrets": {"enabled": false}}` (or `security_dangerous_patterns`).
+**Security checks fail on legitimate files** — hardcoded-secret detection skips `test_*.py`, `__init__.py`, and paths under `fixtures/` or `test_project/`. Adjust thresholds in `.multilint.json`, or disable a check with `"checks": {"security_secrets": {"enabled": false}}` (or `security_dangerous_patterns`).
+
+**A repository above your home directory is not found** — raise the `search_ceiling` setting.
+
+## License
+
+[MIT](LICENSE)
