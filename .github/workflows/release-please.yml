@@ -29,9 +29,13 @@ jobs:
       # pass (needs "Allow auto-merge" in the repository settings). The merge is
       # made with the PAT, so its push to master runs this workflow again, which
       # tags the release and starts docker-publish and npm-publish.
+      #
+      # The PR number is parsed in the shell: step env is evaluated even when
+      # `if` skips the step, and fromJSON() fails on the empty `pr` output of a
+      # run that touched no release PR.
       - name: Auto-merge the release PR
-        if: steps.rp.outputs.pr
+        if: steps.rp.outputs.pr != ''
         env:
           GH_TOKEN: ${{ secrets.MULTILINT_ACTIONS_TOKEN }}
-          PR_NUMBER: ${{ fromJSON(steps.rp.outputs.pr).number }}
-        run: gh pr merge "$PR_NUMBER" --auto --rebase --repo "$GITHUB_REPOSITORY"
+          PR_JSON: ${{ steps.rp.outputs.pr }}
+        run: gh pr merge "$(jq -r '.number' <<<"$PR_JSON")" --auto --rebase --repo "$GITHUB_REPOSITORY"
