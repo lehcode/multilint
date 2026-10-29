@@ -121,9 +121,6 @@ jobs:
   build:
     name: npm build
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: opencode-plugin
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -133,10 +130,9 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: opencode-plugin/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # The npm package is published from this repo, so esbuild or tsc breakage
       # must not reach master where it would fail the release instead.

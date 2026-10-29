@@ -31,7 +31,9 @@
     "index.js",
     "dist/",
     "scripts/",
+    "!**/__pycache__",
     "hooks/",
+    "agents/",
     ".claude-plugin/plugin.json"
   ],
   "scripts": {
