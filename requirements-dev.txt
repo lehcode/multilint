@@ -26,7 +26,7 @@ pytest-mock==3.16.0
 
 # --- Linters run in CI --------------------------------------------------------
 # Flags live in lint.sh; these are the tools behind them.
-black==26.5.1
+black==26.10.1
 flake8==7.4.1
 
 # --- Tools two unit tests shell out to ----------------------------------------
