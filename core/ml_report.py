@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import ml_results
 
-
 # Cap on the text handed back to Claude. The full lint output of a failing directory runs to several
 # kilobytes; only the failing lines are worth the context.
 MAX_CONTEXT_CHARS = 4000

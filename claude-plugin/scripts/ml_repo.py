@@ -11,7 +11,6 @@ from pathlib import Path
 import ml_settings
 import ml_state
 
-
 LINTABLE_SUFFIXES = {".sh", ".bash", ".py", ".md", ".yaml", ".yml", ".json", ".toml"}
 
 

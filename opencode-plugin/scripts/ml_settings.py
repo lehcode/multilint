@@ -11,7 +11,6 @@ from pathlib import Path
 
 import ml_state
 
-
 # SKIP_DIRS, MAX_SCAN_FILES and MAX_LINT_TARGETS used to live here. They existed to make a tree walk
 # survivable: the hook collected every dirty and untracked file in the repository, pruned the
 # directories it knew to be uninteresting, hashed up to 2000 of them, and capped the result at 25 per
