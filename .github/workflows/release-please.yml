@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Run release-please
+        id: rp
         uses: googleapis/release-please-action@v5
         with:
           # GITHUB_TOKEN-triggered events do not start new workflow runs, so the
@@ -23,3 +24,14 @@ jobs:
           token: ${{ secrets.MULTILINT_ACTIONS_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Queue the release PR for merge once the master ruleset's required checks
+      # pass (needs "Allow auto-merge" in the repository settings). The merge is
+      # made with the PAT, so its push to master runs this workflow again, which
+      # tags the release and starts docker-publish and npm-publish.
+      - name: Auto-merge the release PR
+        if: steps.rp.outputs.pr
+        env:
+          GH_TOKEN: ${{ secrets.MULTILINT_ACTIONS_TOKEN }}
+          PR_NUMBER: ${{ fromJSON(steps.rp.outputs.pr).number }}
+        run: gh pr merge "$PR_NUMBER" --auto --rebase --repo "$GITHUB_REPOSITORY"
